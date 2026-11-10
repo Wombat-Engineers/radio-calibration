@@ -1,0 +1,103 @@
+# Task definitions. Install Task from https://taskfile.dev, then:
+#   task --list            show each task with its description
+#   task --summary <name>  show the full description and the examples of one task
+version: "3"
+
+tasks:
+  default:
+    desc: Show the list of tasks.
+    summary: |
+      Show each task with its description.
+
+      Example:
+        task
+    silent: true
+    cmds:
+      - task --list
+
+  setup:
+    desc: Install the dependencies and the git hooks.
+    summary: |
+      Install the locked dependencies into .venv, then install the pre-commit git hooks.
+      Run this task one time after you clone the repository, and again after uv.lock changes.
+
+      Example:
+        task setup
+    cmds:
+      - uv sync
+      - uv run pre-commit install
+
+  lint:
+    desc: Check the code with Ruff (lint rules and format). Changes no file.
+    summary: |
+      Run the Ruff lint rules and the Ruff format check. The task changes no file.
+      Give a path after "--" to check only that path.
+
+      Examples:
+        task lint
+        task lint -- src/utils
+    cmds:
+      - uv run ruff check {{.CLI_ARGS | default "."}}
+      - uv run ruff format --check {{.CLI_ARGS | default "."}}
+
+  format:
+    desc: Fix the lint findings that Ruff can fix, then format the code.
+    summary: |
+      Apply the automatic Ruff fixes and the Ruff format. The task changes files.
+      Give a path after "--" to change only that path.
+
+      Examples:
+        task format
+        task format -- tests/test_utils.py
+    cmds:
+      - uv run ruff check --fix {{.CLI_ARGS | default "."}}
+      - uv run ruff format {{.CLI_ARGS | default "."}}
+
+  test:
+    desc: Run the tests with pytest. Needs an NVIDIA GPU.
+    summary: |
+      Run the full test suite. The Mitsuba and Sionna RT tests use CUDA only.
+      Give pytest arguments after "--" to run a part of the suite.
+
+      Examples:
+        task test
+        task test -- -v
+        task test -- tests/test_utils.py
+        task test -- tests/test_environment.py::test_torch_autograd
+    cmds:
+      - uv run pytest {{.CLI_ARGS}}
+
+  hooks:
+    desc: Run all pre-commit hooks on all files.
+    summary: |
+      Run each hook from .pre-commit-config.yaml on all files, not only on staged files.
+      Some hooks change files. Run the task again if a hook changed a file.
+      Give a hook id after "--" to run only that hook.
+
+      Examples:
+        task hooks
+        task hooks -- nbstripout
+    cmds:
+      - uv run pre-commit run --all-files {{.CLI_ARGS}}
+
+  check:
+    desc: Run lint, then the tests. Use it before a commit.
+    summary: |
+      Run the "lint" task, then the "test" task. The task stops at the first failure.
+
+      Example:
+        task check
+    cmds:
+      - task: lint
+      - task: test
+
+  lab:
+    desc: Start JupyterLab in the notebooks directory.
+    summary: |
+      Start JupyterLab with the project environment. The browser opens the notebooks directory.
+      Stop the server with Ctrl+C.
+
+      Example:
+        task lab
+    cmds:
+      - uv run jupyter lab --notebook-dir=notebooks

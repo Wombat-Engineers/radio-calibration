@@ -1,0 +1,66 @@
+[project]
+name = "radio-calibration"
+version = "0.1.0"
+description = "Calibration of Sionna RT radio maps against measurements with PyTorch models."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "drjit>=1.5.0",
+    "hydra-core>=1.3.8",
+    "ipykernel>=7.4.0",
+    "ipywidgets>=8.1.9",
+    "jupyterlab>=4.6.6",
+    "matplotlib>=3.11.2",
+    "mitsuba>=3.9.1",
+    "notebook>=7.6.5",
+    "numpy>=2.5.4",
+    "pandas>=3.1.1",
+    "pyarrow>=26.0.1",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.18.1",
+    "sionna-rt>=2.2.0",
+    "tensorboard>=2.21.0",
+    "torch>=2.15.0",
+    "tqdm>=4.70.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.30,<0.12"]
+build-backend = "uv_build"
+
+# The importable package is the `src` directory itself (`import src.utils`).
+[tool.uv.build-backend]
+module-name = "src"
+module-root = ""
+
+# PyPI has only CPU builds of torch for Windows. The CUDA 13.4 builds are on the PyTorch index.
+# A package that must match torch (torchvision, torchaudio) needs its own line in
+# [tool.uv.sources], or uv installs the CPU build from PyPI.
+[[tool.uv.index]]
+name = "pytorch-cu134"
+url = "https://download.pytorch.org/whl/cu134"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu134", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+
+[tool.ruff]
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "nbstripout>=0.9.1",
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]

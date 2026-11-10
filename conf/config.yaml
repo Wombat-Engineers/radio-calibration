@@ -1,0 +1,2 @@
+# Root Hydra config. Add config groups (data, model, scene) as subdirectories of conf/.
+seed: 0
