@@ -89,7 +89,7 @@ def test_matplotlib_headless(tmp_path):
 
 
 def test_hydra_compose():
-    with initialize_config_dir(config_dir=str(PROJECT_ROOT / "conf"), version_base=None):
+    with initialize_config_dir(config_dir=str(PROJECT_ROOT / "configs"), version_base=None):
         cfg = compose(config_name="config")
 
     assert isinstance(cfg, DictConfig)

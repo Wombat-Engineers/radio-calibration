@@ -1,0 +1,82 @@
+# Configuration of the scenario generator. Run it with `task scenario`.
+# The generator writes cells.csv, mdt.csv, and scenario_config.yaml to data/raw/.
+# Lengths are in meters. Angles are in degrees.
+# The Sionna RT configuration is in configs/simulation.yaml, under the key `simulation`.
+
+defaults:
+  - simulation@simulation
+  - _self_
+
+seed: 0
+
+# Grid for the height map and the building density. A "tile" is one square of this grid.
+# A "cell" is always a cell of a site.
+grid:
+  tile_size_m: 5.0
+  # A grid tile above this height is a building.
+  min_building_height_m: 2.0
+
+# The generator copies this block to each row of cells.csv.
+# Sionna RT planar array; spacings in wavelengths.
+antenna:
+  # Reference-signal power per resource element [dBm].
+  power_rs: 4.85
+
+  # Macro-cell array.
+  transmitter:
+    num_rows: 8
+    num_cols: 8
+    vertical_spacing: 0.5
+    horizontal_spacing: 0.5
+    pattern: "tr38901"
+    polarization: "cross"
+
+sites:
+  # Side of the triangle of sites. 500 m is the UMa inter-site distance of
+  # 3GPP TR 38.901, Table 7.2-1.
+  isd_m: 500.0
+  # Offset of the center of the triangle from the center of the scene.
+  center_offset_m: [0.0, 0.0]
+  # Antenna height above the ground. 25 m is the UMa height of 3GPP TR 38.901, Table 7.2-1.
+  mast_height_m: 25.0
+  sector_azimuths_deg: [0.0, 120.0, 240.0]
+  downtilt_deg: 5.0
+
+traffic:
+  start: "2026-01-05T00:00"
+  num_days: 1
+  slot_minutes: 15
+  # Mean number of MDT records in one day.
+  records_per_day: 1000
+  # Half of the side of the square window for the building density.
+  density_radius_m: 100.0
+  # The business part of the traffic is in proportion to density ** business_exponent.
+  business_exponent: 2.0
+  # Relative traffic for each hour from 00:00 to 23:00. The shapes agree with the
+  # residential and office patterns of arXiv:1510.04026. The values are assumptions.
+  residential_profile: [0.30, 0.20, 0.15, 0.10, 0.10, 0.15, 0.30, 0.50, 0.60, 0.50, 0.45, 0.45,
+                        0.50, 0.45, 0.45, 0.50, 0.60, 0.75, 0.90, 1.00, 1.00, 0.90, 0.70, 0.45]
+  business_profile: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.10, 0.30, 0.70, 0.90, 1.00, 1.00,
+                     0.90, 0.95, 1.00, 0.95, 0.85, 0.65, 0.40, 0.25, 0.15, 0.10, 0.05, 0.05]
+
+# UE height above the ground: a normal distribution, truncated to [min_m, max_m].
+# std_m is an assumption.
+ue_height:
+  mean_m: 1.5
+  std_m: 0.15
+  min_m: 0.5
+  max_m: 2.5
+
+measurement:
+  # Measured RSRP = true RSRP + normal(rsrp_noise_mean_db, rsrp_noise_std_db).
+  rsrp_noise_mean_db: -5.0
+  # Assumption.
+  rsrp_noise_std_db: 2.0
+  # Standard deviation of the GNSS error on x and on y. Assumption.
+  gnss_std_m: 5.0
+  # A cell below this RSRP is not in the record.
+  min_rsrp_dbm: -140.0
+  # Resolution of an SS-RSRP report: 1 dB (3GPP TS 38.133).
+  rsrp_resolution_db: 1.0
+  # Maximum number of times that the generator samples the rejected records again.
+  max_resample_rounds: 20

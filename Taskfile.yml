@@ -67,6 +67,35 @@ tasks:
     cmds:
       - uv run pytest {{.CLI_ARGS}}
 
+  scenario:
+    desc: Generate the cells and the MDT records in data/raw. Needs an NVIDIA GPU.
+    summary: |
+      Read configs/scenario.yaml and configs/simulation.yaml, then write cells.csv, mdt.csv, and scenario_config.yaml
+      to data/raw. The task replaces the files from the last run.
+      Give Hydra overrides after "--" to change a value of the configuration.
+
+      Examples:
+        task scenario
+        task scenario -- traffic.records_per_day=200
+        task scenario -- seed=1 measurement.gnss_std_m=10
+        task scenario -- simulation.solver.max_depth=5
+    cmds:
+      - uv run python -m src.scenario {{.CLI_ARGS}}
+
+  notebook:
+    desc: Run a notebook from the first cell to the last cell. Needs an NVIDIA GPU.
+    summary: |
+      Run all cells of a notebook and write a copy with the outputs to outputs/notebooks.
+      The task does not change the notebook in notebooks/. It stops at the first cell that fails.
+      Give the path of a notebook after "--". The default is notebooks/00_scenario.ipynb,
+      which needs the files from "task scenario".
+
+      Examples:
+        task notebook
+        task notebook -- notebooks/01_eda.ipynb
+    cmds:
+      - uv run jupyter nbconvert --execute --to notebook --output-dir outputs/notebooks {{.CLI_ARGS | default "notebooks/00_scenario.ipynb"}}
+
   hooks:
     desc: Run all pre-commit hooks on all files.
     summary: |

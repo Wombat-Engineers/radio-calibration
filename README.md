@@ -27,11 +27,15 @@ The calibration method is not documented yet.
 
 ### Capabilities
 
-The repository is at the setup stage. It contains these parts:
+The repository contains these parts:
 
 - A locked Python environment with PyTorch (CUDA 13.4), Sionna RT, Mitsuba, and Dr.Jit.
+- A scenario generator. It puts 3 sites with 3 cells each in a Sionna RT scene and writes
+  synthetic MDT (minimization of drive tests) records. See [Scenario data](#scenario-data).
+- Sionna RT functions that load a scene, measure the building heights, and calculate RSRP.
 - Shared utilities for paths, figure style, random seeds, device selection, and notebook setup.
-- Tests that run each main library, with Sionna RT on the CUDA backend.
+- Tests for each package, with Sionna RT on the CUDA backend.
+- A notebook that examines the scenario data.
 - Four empty notebooks for data exploration, preprocessing, modeling, and evaluation.
 
 _Calibration capabilities: not documented yet._
@@ -42,24 +46,33 @@ _Not documented yet._
 
 ## Architecture
 
-The diagram shows the intended data flow.
-Only `src/utils` exists today. The other blocks are not implemented.
+The diagram shows the data flow of the scenario generator.
+The calibration model is not implemented.
 
 ```mermaid
 flowchart LR
-    scene[Scene and material parameters] --> solver[Sionna RT RadioMapSolver]
-    solver --> simulated[Simulated radio map]
-    measurements[(Measurements)] --> model[PyTorch calibration model]
-    simulated --> model
-    model --> calibrated[Calibrated radio map]
+    sim[configs/simulation.yaml] --> cfg[configs/scenario.yaml]
+    cfg --> gen[src.scenario.generate.main]
+    gen --> scene[src.simulation.load_rt_scene]
+    scene --> hm[src.simulation.building_height_map]
+    hm --> sites[src.scenario.sites.place_sites]
+    hm --> mdt[src.scenario.mdt.sample_mdt]
+    sites --> mdt
+    mdt -- positions --> rsrp[src.simulation.compute_rsrp]
+    rsrp -- RSRP --> mdt
+    sites --> cells[(data/raw/cells.csv)]
+    mdt --> out[(data/raw/mdt.csv)]
 ```
 
 ### Components
 
 | Component | Responsibility | Location |
 |---|---|---|
+| Core | The `Cell` record and the format of `cells.csv` | [`src/core/`](src/core/) |
+| Simulation | All Sionna RT calls: scene load, building heights, RSRP from the path solver | [`src/simulation/`](src/simulation/) |
+| Scenario | Site placement, traffic model, MDT records. It has no Sionna RT import. | [`src/scenario/`](src/scenario/) |
 | Utilities | Paths, figure style, random seeds, device selection, notebook setup | [`src/utils/`](src/utils/) |
-| Configuration | Hydra configuration files | [`conf/`](conf/) |
+| Configuration | Hydra configuration files | [`configs/`](configs/) |
 | Notebooks | Exploration, preprocessing, modeling, evaluation | [`notebooks/`](notebooks/) |
 | Tests | Checks of the environment and of the utilities | [`tests/`](tests/) |
 
@@ -113,7 +126,7 @@ uv run pytest
 Expected last line of the output:
 
 ```
-============================= 13 passed in 17.33s =============================
+============================= 61 passed in 17.44s =============================
 ```
 
 The time changes from run to run.
@@ -125,13 +138,59 @@ The CUDA variants operate without LLVM.
 
 ## Configuration
 
-[Hydra](https://hydra.cc/) reads the configuration from [`conf/config.yaml`](conf/config.yaml).
+[Hydra](https://hydra.cc/) reads the configuration from [`configs/`](configs/).
+
+[`configs/config.yaml`](configs/config.yaml) is the root configuration:
 
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `seed` | integer | `0` | Seed for the random generators. |
 
-Precedence: command-line overrides, then `conf/config.yaml`.
+The scenario generator uses two files. Each file has a comment for each value.
+
+[`configs/simulation.yaml`](configs/simulation.yaml) is the configuration of Sionna RT.
+These are the primary values:
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `scene.name` | string | `munich` | A scene that Sionna RT supplies, or a file `<name>.xml` in `data/external/scenes`. |
+| `radio.frequency_hz` | number | `2.6e9` | Carrier frequency. |
+| `radio.subcarrier_spacing_hz` | number | `30e3` | Bandwidth of the scene: one resource element. |
+| `receiver` | mapping | 1 x 1 dipole, V | Planar array of the UE. |
+| `solver.max_depth` | integer | `8` | Maximum number of interactions of a path. |
+| `solver.samples_per_src` | integer | `1000000` | Number of rays for each source. |
+| `solver.refraction` | boolean | `false` | With `false`, an indoor position gets no signal. |
+| `solver.diffraction` | boolean | `true` | Diffraction at building edges. |
+| `rx_batch_size` | integer | `100` | Number of UE positions in one solver call. |
+
+The `solver` block has all arguments of the Sionna RT `PathSolver`.
+The code gives the block to the solver without a change.
+
+[`configs/scenario.yaml`](configs/scenario.yaml) is the configuration of the test scenario.
+It loads `simulation.yaml` into its key `simulation`.
+These are the primary values:
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `seed` | integer | `0` | Seed for the random generators. |
+| `grid.tile_size_m` | number | `5` | Side of a tile of the grid for the height map, in meters. |
+| `grid.min_building_height_m` | number | `2` | A grid tile above this height is a building. |
+| `antenna.power_rs` | number | `4.85` | Reference-signal power for each resource element, in dBm. |
+| `antenna.transmitter` | mapping | 8 x 8 tr38901, cross | Planar array of each cell. The generator writes it to `cells.csv`. |
+| `sites.isd_m` | number | `500` | Side of the triangle of sites, in meters. |
+| `sites.mast_height_m` | number | `25` | Antenna height above the ground, in meters. |
+| `sites.downtilt_deg` | number | `5` | Downtilt of each cell, in degrees. |
+| `traffic.num_days` | integer | `1` | Number of days of MDT records. |
+| `traffic.records_per_day` | number | `1000` | Mean number of MDT records in one day. |
+| `ue_height.mean_m` | number | `1.5` | Mean UE height above the ground, in meters. |
+| `ue_height.min_m`, `ue_height.max_m` | number | `0.5`, `2.5` | Limits of the UE height, in meters. |
+| `measurement.rsrp_noise_mean_db` | number | `-5` | Mean of the RSRP measurement error, in dB. |
+| `measurement.min_rsrp_dbm` | number | `-140` | A cell below this RSRP is not in the record. |
+
+A value of `simulation.yaml` has the prefix `simulation.` in an override, for example
+`simulation.solver.max_depth=5`.
+
+Precedence: command-line overrides, then the YAML files.
 
 The project reads no environment variables and holds no secrets.
 
@@ -149,6 +208,61 @@ print(device)  # cuda
 print(DATA_DIR)  # <repository root>/data
 ```
 
+### Scenario data
+
+Generate the data for the experiments:
+
+```bash
+task scenario
+```
+
+Without Task, use `uv run python -m src.scenario`. Put Hydra overrides after the command,
+for example `task scenario -- traffic.records_per_day=200 simulation.solver.max_depth=5`.
+The command prints the time of the RSRP calculation and the total time.
+
+The command writes three files to `data/raw/`. Each run replaces the files of the last run.
+
+| File | Content |
+|---|---|
+| `cells.csv` | One row for each cell: `cell`, `site`, `x`, `y`, `z`, `azimuth_deg`, `downtilt_deg`, `power_rs_dbm`, and the array columns `num_rows`, `num_cols`, `vertical_spacing`, `horizontal_spacing`, `pattern`, `polarization`. |
+| `mdt.csv` | One row for each MDT record: `timestamp`, `x`, `y`, `z`, and one `rsrp_<cell>` column for each cell. An empty value shows that the UE did not receive the cell. |
+| `scenario_config.yaml` | The configuration of the run. |
+
+Positions are in meters, in the coordinate system of the scene.
+
+The generator does these steps:
+
+1. It measures the height of the scene on a grid. A grid tile above 2 m is a building.
+2. It puts 3 sites at the corners of an equilateral triangle, 25 m above the ground.
+   Each site has 3 cells. A corner in a building moves to the nearest outdoor grid tile.
+3. It draws the number of records of each 15-minute slot from a Poisson distribution.
+   Each record is independent of the other records.
+4. It draws an outdoor position for each record. The probability increases with the
+   building density. A residential part and a business part have different daily patterns,
+   as in [Wang et al., 2015](https://arxiv.org/abs/1510.04026). Thus the positions change
+   during the day.
+5. It calculates the RSRP of each cell at each position with the Sionna RT path solver.
+6. It adds a measurement error to the RSRP and a GNSS error to the position. It rounds the
+   RSRP to 1 dB.
+7. It samples a record again if the position is in a building or if no cell has a signal.
+
+The notebook [`notebooks/00_scenario.ipynb`](notebooks/00_scenario.ipynb) examines the scene,
+the cells, and each step of the MDT generation. Its last cell checks the files against the
+rules of the generator. Run all its cells with this command:
+
+```bash
+task notebook
+```
+
+Without Task, use
+`uv run jupyter nbconvert --execute --to notebook --output-dir outputs/notebooks notebooks/00_scenario.ipynb`.
+The copy with the outputs is in `outputs/notebooks/`.
+The notebook also writes each figure as a PNG file with 300 dpi to `reports/figures/`.
+Git ignores `reports/`.
+
+To use real data, write `cells.csv` and `mdt.csv` with the same columns.
+A converter from latitude and longitude to scene coordinates is not implemented.
+
 _Calibration usage: not documented yet._
 
 ## Development
@@ -157,9 +271,12 @@ _Calibration usage: not documented yet._
 
 ```
 radio-calibration/
-├── conf/             Hydra configuration
+├── configs/          Hydra configuration
 ├── notebooks/        Jupyter notebooks, numbered in the order of the workflow
 ├── src/              Python package (import name: src)
+│   ├── core/         Cell record, cells.csv format
+│   ├── scenario/     Scenario generator: sites, traffic, MDT records
+│   ├── simulation/   Sionna RT calls: scene, building heights, RSRP
 │   └── utils/        Paths, figure style, seeds, device, notebook setup
 ├── tests/            pytest tests
 ├── Taskfile.yml      Task definitions
@@ -198,6 +315,9 @@ uv run pytest
 |---|---|---|---|
 | Environment | Each main library runs: PyTorch on CUDA, Mitsuba and Sionna RT on CUDA, pandas with PyArrow, matplotlib, Hydra, scikit-learn, SciPy | `uv run pytest tests/test_environment.py` | Local machine with an NVIDIA GPU |
 | Unit | `src/utils` | `uv run pytest tests/test_utils.py` | Local machine |
+| Unit | `src/core` | `uv run pytest tests/test_core.py` | Local machine |
+| Unit | `src/simulation`, with the scene `simple_street_canyon` | `uv run pytest tests/test_simulation.py` | Local machine with an NVIDIA GPU |
+| Unit | `src/scenario`. One test runs the full generator on a small scene. | `uv run pytest tests/test_scenario.py` | Local machine with an NVIDIA GPU |
 
 Run one test:
 
