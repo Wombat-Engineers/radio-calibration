@@ -19,9 +19,7 @@ receiver:
   pattern: "dipole"
   polarization: "V"
 
-# Arguments of the Sionna RT PathSolver. The code gives this block to the solver without
-# a change, thus each key must be an argument of PathSolver.__call__ (sionna-rt 2.2.0).
-# A value with the comment "default" is the default value of Sionna RT.
+# Arguments of the Sionna RT PathSolver.
 solver:
   max_depth: 8
   samples_per_src: 1000000
