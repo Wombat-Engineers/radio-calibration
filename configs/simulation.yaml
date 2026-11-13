@@ -30,8 +30,8 @@ solver:
   los: true                       # default
   specular_reflection: true       # default
   diffuse_reflection: false       # default
-  # No refraction: a wall stops the signal, thus an indoor position gets no path.
-  refraction: false
+  # Refraction: a signal can go through a wall, thus an indoor position can get a path.
+  refraction: true
   diffraction: true
   edge_diffraction: false         # default
   diffraction_lit_region: true    # default

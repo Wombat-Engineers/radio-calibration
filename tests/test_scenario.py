@@ -338,7 +338,7 @@ def test_scenario_config_composes():
     cfg = compose_scenario()
 
     assert cfg.simulation.solver.max_depth > 0
-    assert cfg.simulation.solver.refraction is False
+    assert cfg.simulation.solver.refraction is True
     assert cfg.grid.tile_size_m > 0
     assert "radio" not in cfg and "scene" not in cfg
     assert "receiver" not in cfg.antenna

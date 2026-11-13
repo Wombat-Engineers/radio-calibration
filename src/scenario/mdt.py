@@ -7,7 +7,7 @@ import pandas as pd
 from omegaconf import DictConfig
 from scipy.stats import truncnorm
 
-from src.core import Cell
+from src.core import MDT_POSITION_COLUMNS, Cell, rsrp_column
 from src.scenario.traffic import slot_counts, spatial_weights
 from src.simulation import HeightMap
 
@@ -137,15 +137,11 @@ def sample_mdt(
         )
 
     reported_xy = positions[:, :2] + rng.normal(0.0, measurement.gnss_std_m, size=(slots.size, 2))
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.Timestamp(traffic.start)
-            + pd.to_timedelta(slots * traffic.slot_minutes, unit="min"),
-            "x": reported_xy[:, 0],
-            "y": reported_xy[:, 1],
-            "z": positions[:, 2],
-        }
+    timestamps = pd.Timestamp(traffic.start) + pd.to_timedelta(
+        slots * traffic.slot_minutes, unit="min"
     )
+    position_values = (timestamps, reported_xy[:, 0], reported_xy[:, 1], positions[:, 2])
+    frame = pd.DataFrame(dict(zip(MDT_POSITION_COLUMNS, position_values, strict=True)))
     for index, cell in enumerate(cells):
-        frame[f"rsrp_{cell.name}"] = rsrp[:, index]
+        frame[rsrp_column(cell.name)] = rsrp[:, index]
     return frame

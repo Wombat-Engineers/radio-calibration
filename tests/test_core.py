@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from src.core import Cell, read_cells, write_cells
+from src.core import MDT_POSITION_COLUMNS, Cell, read_cells, rsrp_column, write_cells
 
 
 def make_cell(name: str = "site0_sector0", **changes) -> Cell:
@@ -42,3 +42,11 @@ def test_read_cells_missing_column(tmp_path):
 
     with pytest.raises(ValueError, match="pattern"):
         read_cells(path)
+
+
+def test_rsrp_column():
+    assert rsrp_column("site0_sector0") == "rsrp_site0_sector0"
+
+
+def test_mdt_position_columns():
+    assert MDT_POSITION_COLUMNS == ("timestamp", "x", "y", "z")

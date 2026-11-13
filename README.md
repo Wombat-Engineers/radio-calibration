@@ -36,7 +36,11 @@ The repository contains these parts:
 - Shared utilities for paths, figure style, random seeds, device selection, and notebook setup.
 - Tests for each package, with Sionna RT on the CUDA backend.
 - A notebook that examines the scenario data.
-- Four empty notebooks for data exploration, preprocessing, modeling, and evaluation.
+- A notebook for the exploratory data analysis (EDA) of the MDT records.
+- Validation rules for `cells.csv` and `mdt.csv`, and a notebook that validates the data and
+  writes it to `data/processed/` in the Parquet format. See
+  [Exploratory analysis and preprocessing](#exploratory-analysis-and-preprocessing).
+- Two empty notebooks for modeling and evaluation.
 
 _Calibration capabilities: not documented yet._
 
@@ -68,7 +72,8 @@ flowchart LR
 
 | Component | Responsibility | Location |
 |---|---|---|
-| Core | The `Cell` record and the format of `cells.csv` | [`src/core/`](src/core/) |
+| Core | The `Cell` record, the format of `cells.csv`, and the column names of `mdt.csv` | [`src/core/`](src/core/) |
+| Data | Validation rules of `cells.csv` and `mdt.csv`, and the long format of `data/processed/`. It has no Sionna RT import. | [`src/data/`](src/data/) |
 | Simulation | All Sionna RT calls: scene load, building heights, RSRP from the path solver | [`src/simulation/`](src/simulation/) |
 | Scenario | Site placement, traffic model, MDT records. It has no Sionna RT import. | [`src/scenario/`](src/scenario/) |
 | Utilities | Paths, figure style, random seeds, device selection, notebook setup | [`src/utils/`](src/utils/) |
@@ -126,7 +131,7 @@ uv run pytest
 Expected last line of the output:
 
 ```
-============================= 61 passed in 17.44s =============================
+============================= 82 passed in 10.91s =============================
 ```
 
 The time changes from run to run.
@@ -159,7 +164,7 @@ These are the primary values:
 | `receiver` | mapping | 1 x 1 dipole, V | Planar array of the UE. |
 | `solver.max_depth` | integer | `8` | Maximum number of interactions of a path. |
 | `solver.samples_per_src` | integer | `1000000` | Number of rays for each source. |
-| `solver.refraction` | boolean | `false` | With `false`, an indoor position gets no signal. |
+| `solver.refraction` | boolean | `true` | With `true`, a signal can go through a wall. With `false`, an indoor position gets no signal. |
 | `solver.diffraction` | boolean | `true` | Diffraction at building edges. |
 | `rx_batch_size` | integer | `100` | Number of UE positions in one solver call. |
 
@@ -225,7 +230,7 @@ The command writes three files to `data/raw/`. Each run replaces the files of th
 | File | Content |
 |---|---|
 | `cells.csv` | One row for each cell: `cell`, `site`, `x`, `y`, `z`, `azimuth_deg`, `downtilt_deg`, `power_rs_dbm`, and the array columns `num_rows`, `num_cols`, `vertical_spacing`, `horizontal_spacing`, `pattern`, `polarization`. |
-| `mdt.csv` | One row for each MDT record: `timestamp`, `x`, `y`, `z`, and one `rsrp_<cell>` column for each cell. An empty value shows that the UE did not receive the cell. |
+| `mdt.csv` | One row for each MDT record: `timestamp`, `x`, `y`, `z`, and one `rsrp_<cell>` column for each cell. An empty value shows that the UE did not receive the cell. [`src/core/mdt.py`](src/core/mdt.py) sets the column names. |
 | `scenario_config.yaml` | The configuration of the run. |
 
 Positions are in meters, in the coordinate system of the scene.
@@ -247,8 +252,7 @@ The generator does these steps:
 7. It samples a record again if the position is in a building or if no cell has a signal.
 
 The notebook [`notebooks/00_scenario.ipynb`](notebooks/00_scenario.ipynb) examines the scene,
-the cells, and each step of the MDT generation. Its last cell checks the files against the
-rules of the generator. Run all its cells with this command:
+the cells, and each step of the MDT generation. Run all its cells with this command:
 
 ```bash
 task notebook
@@ -263,6 +267,46 @@ Git ignores `reports/`.
 To use real data, write `cells.csv` and `mdt.csv` with the same columns.
 A converter from latitude and longitude to scene coordinates is not implemented.
 
+### Exploratory analysis and preprocessing
+
+Two notebooks read the files in `data/raw/`. Run `task scenario` first.
+
+```mermaid
+flowchart LR
+    raw[(data/raw)] --> eda[notebooks/01_eda.ipynb]
+    scene[src.simulation.building_height_map] --> eda
+    raw --> pre[notebooks/02_preprocessing.ipynb]
+    pre --> val[src.data.validate_cells, src.data.validate_mdt]
+    val -- all counts 0 --> long[src.data.mdt_to_long]
+    val -- a count above 0 --> stop[AssertionError: no file]
+    long --> out[(data/processed)]
+```
+
+[`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb) is the exploratory data analysis. It has
+10 sections: setup, load data, schema and dtypes, missingness, univariate distributions,
+target analysis, group structure, relationships, temporal and spatial structure, and findings.
+The target is the reported RSRP of one (record, cell) pair. The notebook loads the Sionna RT
+scene for the building height map, thus it needs an NVIDIA GPU. It writes its figures with
+the prefix `eda_` to `reports/figures/`.
+
+```bash
+task notebook -- notebooks/01_eda.ipynb
+```
+
+[`notebooks/02_preprocessing.ipynb`](notebooks/02_preprocessing.ipynb) validates the data and
+writes it to `data/processed/`. It does not change a value. `validate_cells` and
+`validate_mdt` count the rows that break each rule. If a count is not zero, the notebook stops
+and writes no file. The notebook does not need a GPU.
+
+```bash
+task notebook -- notebooks/02_preprocessing.ipynb
+```
+
+| File | Content |
+|---|---|
+| `data/processed/mdt.parquet` | One row for each received (record, cell) pair: `record`, `timestamp`, `x`, `y`, `z`, `cell`, `rsrp_dbm`. `record` is the row index in `mdt.csv`, from 0. A missing RSRP gives no row. |
+| `data/processed/cells.parquet` | The content of `cells.csv` |
+
 _Calibration usage: not documented yet._
 
 ## Development
@@ -274,7 +318,8 @@ radio-calibration/
 ├── configs/          Hydra configuration
 ├── notebooks/        Jupyter notebooks, numbered in the order of the workflow
 ├── src/              Python package (import name: src)
-│   ├── core/         Cell record, cells.csv format
+│   ├── core/         Cell record, cells.csv format, mdt.csv column names
+│   ├── data/         Validation rules, long format of data/processed
 │   ├── scenario/     Scenario generator: sites, traffic, MDT records
 │   ├── simulation/   Sionna RT calls: scene, building heights, RSRP
 │   └── utils/        Paths, figure style, seeds, device, notebook setup
@@ -316,6 +361,7 @@ uv run pytest
 | Environment | Each main library runs: PyTorch on CUDA, Mitsuba and Sionna RT on CUDA, pandas with PyArrow, matplotlib, Hydra, scikit-learn, SciPy | `uv run pytest tests/test_environment.py` | Local machine with an NVIDIA GPU |
 | Unit | `src/utils` | `uv run pytest tests/test_utils.py` | Local machine |
 | Unit | `src/core` | `uv run pytest tests/test_core.py` | Local machine |
+| Unit | `src/data` | `uv run pytest tests/test_data.py` | Local machine |
 | Unit | `src/simulation`, with the scene `simple_street_canyon` | `uv run pytest tests/test_simulation.py` | Local machine with an NVIDIA GPU |
 | Unit | `src/scenario`. One test runs the full generator on a small scene. | `uv run pytest tests/test_scenario.py` | Local machine with an NVIDIA GPU |
 
