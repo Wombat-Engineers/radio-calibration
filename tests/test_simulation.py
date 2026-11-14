@@ -267,6 +267,29 @@ def test_compute_rsrp_with_neural_material(neural_scene):
     assert np.isfinite(rsrp).all()
 
 
+def test_compute_rsrp_mw_repeats_exactly(neural_scene):
+    scene, _ = neural_scene
+    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
+
+    runs = [compute_rsrp_mw(scene, CELLS, positions, SIMULATION).numpy() for _ in range(3)]
+
+    np.testing.assert_array_equal(runs[0], runs[1])
+    np.testing.assert_array_equal(runs[0], runs[2])
+
+
+def test_compute_rsrp_no_synthetic_array(scene):
+    # Without a synthetic array, the delays have one value for each antenna pair.
+    real_array = OmegaConf.merge(SIMULATION, {"solver": {"synthetic_array": False}})
+
+    rsrp = compute_rsrp(scene, CELLS, np.array([STREET]), real_array)
+
+    assert rsrp.shape == (1, 2)
+    assert np.isfinite(rsrp).all()
+    np.testing.assert_allclose(
+        rsrp, compute_rsrp(scene, CELLS, np.array([STREET]), SIMULATION), atol=1.0
+    )
+
+
 def test_compute_rsrp_mw_gradient(neural_scene):
     scene, material = neural_scene
     # No weight decay: only a gradient can change the weights.

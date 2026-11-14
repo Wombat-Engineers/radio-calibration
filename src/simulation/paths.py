@@ -68,6 +68,28 @@ def _remove_cells(scene: sionna.rt.Scene, cells: Sequence[Cell]) -> None:
         scene.remove(cell.name)
 
 
+def _sorted_by_path(power: mi.TensorXf, tau: np.ndarray) -> mi.TensorXf:
+    """Return the path powers with the paths of each row in one fixed order.
+
+    Args:
+        power: Power of each path, with shape `[num_rx, num_rx_ant, num_tx, num_paths]`.
+        tau: Delays of the paths, with shape `[num_rx, num_tx, num_paths]`, or with the
+            antenna axes `[num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]`.
+
+    Returns:
+        `power` sorted along the last axis by delay, then by power.
+    """
+    shape = tuple(power.shape)
+    num_paths = shape[3]
+    if tau.ndim == 5:
+        tau = tau[:, 0, :, 0, :]
+    keys = (power.numpy(), np.broadcast_to(tau[:, None, :, :], shape))
+    order = np.lexsort(keys, axis=-1).reshape(-1, num_paths)
+    rows = np.arange(order.shape[0])[:, None] * num_paths
+    index = mi.UInt32((rows + order).ravel().astype(np.uint32))
+    return mi.TensorXf(dr.gather(mi.Float, power.array, index), shape)
+
+
 def _gain_tensor(
     scene: sionna.rt.Scene,
     positions: np.ndarray,
@@ -96,6 +118,9 @@ def _gain_tensor(
         # vector of the Sionna RT RadioMapSolver.
         num_tx_ant = a_real.shape[3]
         power = (dr.square(dr.sum(a_real, axis=3)) + dr.square(dr.sum(a_imag, axis=3))) / num_tx_ant
+        # Sionna RT returns the same paths in a different order in each run. A fixed order
+        # makes the float sum below the same in each run.
+        power = _sorted_by_path(power, paths.tau.numpy())
         # Sum of the path powers, not of the path amplitudes: layer-3 filtering removes
         # fast fading from a reported RSRP.
         gain = dr.sum(power, axis=(1, 3))

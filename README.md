@@ -394,6 +394,11 @@ The notebook writes these files to `outputs/calibration/`:
 | `calibration.npz` | The weights of the network, the network structure, the normalization of the positions, and the power scale. `src.calibration.load_calibration` reads it and gives a `NeuralRadioMaterial` and the scale. |
 | `history.csv` | The loss, the power scale, and the validation loss at each step |
 
+The simulated RSRP is the same in each run, bit for bit. The calibration is not: Dr.Jit adds
+the gradients on the GPU with atomic float operations, in an order that changes from run to run.
+Small differences then grow during the gradient steps, thus notebook 03 gives slightly different
+results in each run. Report the result of more than one run with its spread.
+
 The values in use in [`configs/calibration.yaml`](configs/calibration.yaml) and
 [`configs/simulation.yaml`](configs/simulation.yaml) are small. They let the calibration run on
 a GPU with 4 GB of memory. A comment `Recommended` beside a value gives the value for a GPU
