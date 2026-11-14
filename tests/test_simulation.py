@@ -39,6 +39,7 @@ SIMULATION = OmegaConf.create(
             "diffraction": False,
             "refraction": False,
         },
+        "deterministic": True,
         "rx_batch_size": 4,
     }
 )
@@ -118,6 +119,15 @@ def test_compute_rsrp_batches_equal(scene):
         compute_rsrp(scene, CELLS, positions, SIMULATION),
         atol=1.0,
     )
+
+
+def test_compute_rsrp_deterministic_repeats(scene):
+    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
+
+    first = compute_rsrp(scene, CELLS, positions, SIMULATION)
+    second = compute_rsrp(scene, CELLS, positions, SIMULATION)
+
+    np.testing.assert_array_equal(first, second)
 
 
 def test_compute_rsrp_mixed_arrays(scene):

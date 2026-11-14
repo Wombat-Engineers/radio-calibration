@@ -6,14 +6,14 @@ from pathlib import Path
 
 import hydra
 import numpy as np
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from src.core import read_cells, write_cells
 from src.scenario.mdt import sample_mdt
 from src.scenario.sites import place_sites
 from src.scenario.traffic import building_density
 from src.simulation import building_height_map, compute_rsrp, is_outdoor, load_rt_scene
-from src.utils import DATA_DIR, PROJECT_ROOT, seed_everything
+from src.utils import CONFIG_DIR, DATA_DIR, seed_everything
 
 log = logging.getLogger(__name__)
 
@@ -21,12 +21,12 @@ log = logging.getLogger(__name__)
 def generate(cfg: DictConfig, output_dir: Path) -> None:
     """Generate the scenario data and write it to a directory.
 
-    The function writes `cells.csv`, `mdt.csv`, and `scenario_config.yaml`. It replaces
-    files that exist. It logs the time of the RSRP calculation and the total time.
+    The function writes `cells.csv` and `mdt.csv`. It replaces files that exist. It logs
+    the time of the RSRP calculation and the total time.
 
     Args:
-        cfg: The configuration from `configs/scenario.yaml`, with the content of
-            `configs/simulation.yaml` in the key `simulation`.
+        cfg: The configuration from `configs/config.yaml`. The function uses `seed`,
+            `scenario`, and `simulation`.
         output_dir: Directory for the files. The function creates it if necessary.
 
     Raises:
@@ -34,27 +34,28 @@ def generate(cfg: DictConfig, output_dir: Path) -> None:
         RuntimeError: If some MDT records have no valid position.
     """
     started = time.perf_counter()
+    scenario = cfg.scenario
     seed_everything(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     scene = load_rt_scene(cfg.simulation.scene.name)
-    height_map = building_height_map(scene, cfg.grid.tile_size_m)
+    height_map = building_height_map(scene, scenario.grid.tile_size_m)
     ny, nx = height_map.heights.shape
     center_xy = (
-        height_map.x_min + nx * height_map.tile_size / 2 + cfg.sites.center_offset_m[0],
-        height_map.y_min + ny * height_map.tile_size / 2 + cfg.sites.center_offset_m[1],
+        height_map.x_min + nx * height_map.tile_size / 2 + scenario.sites.center_offset_m[0],
+        height_map.y_min + ny * height_map.tile_size / 2 + scenario.sites.center_offset_m[1],
     )
     cells = place_sites(
         height_map,
-        cfg.grid.min_building_height_m,
+        scenario.grid.min_building_height_m,
         center_xy,
-        cfg.sites.isd_m,
-        cfg.sites.mast_height_m,
-        cfg.sites.sector_azimuths_deg,
-        cfg.sites.downtilt_deg,
-        cfg.antenna.power_rs,
-        cfg.antenna.transmitter,
+        scenario.sites.isd_m,
+        scenario.sites.mast_height_m,
+        scenario.sites.sector_azimuths_deg,
+        scenario.sites.downtilt_deg,
+        scenario.antenna.power_rs,
+        scenario.antenna.transmitter,
     )
     # Read the file again: the RSRP then comes from the same data as with a real network file.
     cells_path = output_dir / "cells.csv"
@@ -80,16 +81,15 @@ def generate(cfg: DictConfig, output_dir: Path) -> None:
         outdoor_fn=lambda positions: is_outdoor(scene, positions),
         cells=cells,
         height_map=height_map,
-        min_building_height_m=cfg.grid.min_building_height_m,
+        min_building_height_m=scenario.grid.min_building_height_m,
         density=building_density(
-            height_map, cfg.grid.min_building_height_m, cfg.traffic.density_radius_m
+            height_map, scenario.grid.min_building_height_m, scenario.traffic.density_radius_m
         ),
-        traffic=cfg.traffic,
-        ue_height=cfg.ue_height,
-        measurement=cfg.measurement,
+        traffic=scenario.traffic,
+        ue_height=scenario.ue_height,
+        measurement=scenario.measurement,
     )
     mdt.to_csv(output_dir / "mdt.csv", index=False)
-    OmegaConf.save(cfg, output_dir / "scenario_config.yaml", resolve=True)
 
     log.info(
         "RSRP: %d positions in %d calls, %.1f s, %.0f ms for each position",
@@ -101,7 +101,7 @@ def generate(cfg: DictConfig, output_dir: Path) -> None:
     log.info("Total: %d MDT records in %.1f s", len(mdt), time.perf_counter() - started)
 
 
-@hydra.main(config_path=str(PROJECT_ROOT / "configs"), config_name="scenario", version_base=None)
+@hydra.main(config_path=str(CONFIG_DIR), config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     """Generate the scenario data in `data/raw`."""
     generate(cfg, DATA_DIR / "raw")

@@ -57,6 +57,7 @@ def calibrate(
     validation: tuple[np.ndarray, np.ndarray],
     calibration: DictConfig,
     simulation: DictConfig,
+    seed: int,
 ) -> CalibrationResult:
     """Calibrate the neural material of a scene against measured RSRP.
 
@@ -75,9 +76,10 @@ def calibrate(
         validation: Positions and measured RSRP of the validation records, with the same
             format.
         calibration: The configuration from `configs/calibration.yaml`. The function uses
-            `seed`, `learning_rate`, `weight_decay`, `num_steps`, `batch_size`,
+            `learning_rate`, `weight_decay`, `num_steps`, `batch_size`,
             `validation_interval`, and `scale_decay`.
         simulation: The configuration from `configs/simulation.yaml`.
+        seed: Seed of the random order of the train records.
 
     Returns:
         The power scale and the history of the steps.
@@ -88,7 +90,7 @@ def calibrate(
     """
     if len(positions) == 0:
         raise ValueError("The calibration needs a minimum of one train record.")
-    rng = np.random.default_rng(calibration.seed)
+    rng = np.random.default_rng(seed)
     optimizer = dr.opt.AdamW(lr=calibration.learning_rate, weight_decay=calibration.weight_decay)
     optimizer.update(network)
     measured_mw = dbm_to_mw(rsrp_dbm)

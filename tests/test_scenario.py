@@ -5,7 +5,6 @@ import logging
 import numpy as np
 import pandas as pd
 import pytest
-from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from src.core import read_cells
@@ -14,7 +13,7 @@ from src.scenario.mdt import sample_mdt
 from src.scenario.sites import place_sites
 from src.scenario.traffic import building_density, slot_counts, spatial_weights
 from src.simulation import HeightMap
-from src.utils import PROJECT_ROOT
+from src.utils import load_config
 
 MIN_BUILDING_HEIGHT = 2.0
 FLAT = [1.0] * 24
@@ -316,9 +315,8 @@ def test_mdt_gnss_error_moves_xy_only():
 
 
 def compose_scenario(*overrides: str):
-    """Compose configs/scenario.yaml with configs/simulation.yaml, as `task scenario` does."""
-    with initialize_config_dir(config_dir=str(PROJECT_ROOT / "configs"), version_base=None):
-        return compose(config_name="scenario", overrides=list(overrides))
+    """Compose configs/config.yaml, as `task scenario` does."""
+    return load_config(*overrides)
 
 
 # A small scene and a small sample count: the GPU of the development machine has 4 GB.
@@ -327,10 +325,10 @@ SMALL_RUN = (
     "simulation.solver.samples_per_src=10000",
     "simulation.solver.max_depth=2",
     "simulation.solver.diffraction=false",
-    "sites.isd_m=60",
-    "sites.mast_height_m=10",
-    "traffic.records_per_day=200",
-    "traffic.density_radius_m=20",
+    "scenario.sites.isd_m=60",
+    "scenario.sites.mast_height_m=10",
+    "scenario.traffic.records_per_day=200",
+    "scenario.traffic.density_radius_m=20",
 )
 
 
@@ -339,9 +337,10 @@ def test_scenario_config_composes():
 
     assert cfg.simulation.solver.max_depth > 0
     assert cfg.simulation.solver.refraction is True
-    assert cfg.grid.tile_size_m > 0
-    assert "radio" not in cfg and "scene" not in cfg
-    assert "receiver" not in cfg.antenna
+    assert cfg.scenario.grid.tile_size_m > 0
+    assert "radio" not in cfg.scenario and "scene" not in cfg.scenario
+    assert "receiver" not in cfg.scenario.antenna
+    assert "seed" not in cfg.scenario and "seed" not in cfg.calibration
 
 
 def test_generate_writes_outputs(tmp_path):
@@ -349,15 +348,13 @@ def test_generate_writes_outputs(tmp_path):
 
     cells = read_cells(tmp_path / "cells.csv")
     mdt = pd.read_csv(tmp_path / "mdt.csv", parse_dates=["timestamp"])
-    saved = OmegaConf.load(tmp_path / "scenario_config.yaml")
     rsrp_columns = [f"rsrp_{cell.name}" for cell in cells]
 
     assert len(cells) == 9
     assert list(mdt.columns) == ["timestamp", "x", "y", "z", *rsrp_columns]
     assert len(mdt) == pytest.approx(200, rel=0.3)
     assert mdt[rsrp_columns].notna().any(axis=1).all()
-    assert saved.simulation.scene.name == "simple_street_canyon"
-    assert saved.simulation.solver.max_depth == 2
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["cells.csv", "mdt.csv"]
 
 
 def test_generate_logs_rsrp_time(tmp_path, caplog):

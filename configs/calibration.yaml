@@ -2,10 +2,9 @@
 # The values in use are small: they let the calibration run on a GPU with 4 GB of memory.
 # A comment "Recommended" gives the value for a GPU with more memory.
 # The method is "Neural Materials" of arXiv:2311.18558, Section III-D.
-# notebooks/02_preprocessing.ipynb reads `seed` and `split`.
-# The Sionna RT configuration is in configs/simulation.yaml.
-
-seed: 0
+# configs/config.yaml loads this file into its key `calibration`.
+# notebooks/02_preprocessing.ipynb reads `split`.
+# The Sionna RT configuration is in configs/simulation.yaml. The seed is in configs/config.yaml.
 
 # Random division of the MDT records: train, validation, test.
 # The proportions agree with arXiv:2311.18558, Section IV-C.

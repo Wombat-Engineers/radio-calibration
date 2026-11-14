@@ -70,14 +70,15 @@ tasks:
   scenario:
     desc: Generate the cells and the MDT records in data/raw. Needs an NVIDIA GPU.
     summary: |
-      Read configs/scenario.yaml and configs/simulation.yaml, then write cells.csv, mdt.csv, and scenario_config.yaml
-      to data/raw. The task replaces the files from the last run.
+      Read configs/config.yaml, then write cells.csv and mdt.csv to data/raw. The task replaces
+      the files from the last run. Hydra writes the configuration and the log of the run to
+      outputs/scenario/<date>/<time>.
       Give Hydra overrides after "--" to change a value of the configuration.
 
       Examples:
         task scenario
-        task scenario -- traffic.records_per_day=200
-        task scenario -- seed=1 measurement.gnss_std_m=10
+        task scenario -- scenario.traffic.records_per_day=200
+        task scenario -- seed=1 scenario.measurement.gnss_std_m=10
         task scenario -- simulation.solver.max_depth=5
     cmds:
       - uv run python -m src.scenario {{.CLI_ARGS}}

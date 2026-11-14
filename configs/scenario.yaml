@@ -1,13 +1,8 @@
 # Configuration of the scenario generator. Run it with `task scenario`.
-# The generator writes cells.csv, mdt.csv, and scenario_config.yaml to data/raw/.
+# configs/config.yaml loads this file into its key `scenario`.
+# The generator writes cells.csv and mdt.csv to data/raw/.
 # Lengths are in meters. Angles are in degrees.
-# The Sionna RT configuration is in configs/simulation.yaml, under the key `simulation`.
-
-defaults:
-  - simulation@simulation
-  - _self_
-
-seed: 0
+# The Sionna RT configuration is in configs/simulation.yaml. The seed is in configs/config.yaml.
 
 # Grid for the height map and the building density. A "tile" is one square of this grid.
 # A "cell" is always a cell of a site.

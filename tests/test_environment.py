@@ -11,7 +11,7 @@ from omegaconf import DictConfig
 from scipy.interpolate import RegularGridInterpolator
 from sklearn.linear_model import LinearRegression
 
-from src.utils import PROJECT_ROOT, get_device
+from src.utils import CONFIG_DIR, get_device
 
 # Sionna RT needs a mono, polarized Mitsuba variant. The tests use CUDA only:
 # a CUDA failure must fail the test, not fall back to the LLVM (CPU) variant.
@@ -89,11 +89,11 @@ def test_matplotlib_headless(tmp_path):
 
 
 def test_hydra_compose():
-    with initialize_config_dir(config_dir=str(PROJECT_ROOT / "configs"), version_base=None):
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
         cfg = compose(config_name="config")
 
     assert isinstance(cfg, DictConfig)
-    assert cfg.seed == 0
+    assert cfg.seed == 42
 
 
 def test_sklearn_scipy():

@@ -1,2 +1,31 @@
-# Root Hydra config. Add config groups (data, model, scene) as subdirectories of configs/.
-seed: 0
+# Root configuration. `task scenario` and `src.utils.load_config` compose this file.
+# Each file below goes into its own key: cfg.scenario, cfg.simulation, cfg.calibration.
+
+defaults:
+  - scenario@scenario
+  - simulation@simulation
+  - calibration@calibration
+  - _self_
+
+# Seed of all random generators: scenario, path solver, data split, and calibration.
+seed: 42
+
+# Output files of the notebooks: figures (PNG) and tables (CSV).
+# A relative path starts at the repository root.
+output:
+  figures:
+    dir: reports/figures
+  tables:
+    dir: reports/tables
+
+# Run directory of `task scenario`. Hydra writes the configuration of the run (.hydra/) and
+# the log there. The data goes to data/raw/ through DATA_DIR, thus the working directory
+# does not change.
+hydra:
+  run:
+    dir: outputs/scenario/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false

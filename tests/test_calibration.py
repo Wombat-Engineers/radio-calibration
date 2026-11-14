@@ -25,7 +25,6 @@ from tests.test_simulation import CELLS, NETWORK, POINTS, SIMULATION, weights_of
 
 CALIBRATION = OmegaConf.create(
     {
-        "seed": 0,
         "learning_rate": 1e-2,
         "weight_decay": 0.0,
         "num_steps": 2,
@@ -145,6 +144,7 @@ def run_calibrate(neural_scene, rsrp_dbm=RSRP_DBM, **changes):
         (POSITIONS[:2], rsrp_dbm[:2]),
         calibration,
         SIMULATION,
+        seed=0,
     )
 
 
@@ -208,6 +208,7 @@ def test_calibrate_no_record(neural_scene):
             (POSITIONS, RSRP_DBM),
             CALIBRATION,
             SIMULATION,
+            seed=0,
         )
 
 

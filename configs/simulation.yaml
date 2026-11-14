@@ -1,5 +1,5 @@
 # Configuration of Sionna RT: the scene, the radio parameters, the UE antenna, and the solver.
-# configs/scenario.yaml loads this file into its key `simulation`.
+# configs/config.yaml loads this file into its key `simulation`.
 
 scene:
   # A scene that Sionna RT supplies, or a file <name>.xml in data/external/scenes.
@@ -36,7 +36,13 @@ solver:
   diffraction: true
   edge_diffraction: false         # default
   diffraction_lit_region: true    # default
-  seed: 42                        # default
+  # The root seed of configs/config.yaml.
+  seed: ${seed}
+
+# Deterministic path solver: two runs with the same seed give the same paths.
+# Set false if the GPU runs out of memory: this solver uses more memory
+# (Sionna RT, PathSolver.__init__).
+deterministic: true
 
 # Number of UE positions in one PathSolver call. Assumption.
 rx_batch_size: 10                 # Recommended: 100

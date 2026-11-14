@@ -2,19 +2,21 @@
 
 import torch
 from IPython import get_ipython
+from omegaconf import DictConfig
 
+from src.utils.output import configure_output
 from src.utils.plotting import configure_matplotlib
 from src.utils.reproducibility import get_device, seed_everything
 
 
-def setup_notebook(seed: int = 0) -> torch.device:
+def setup_notebook(cfg: DictConfig) -> torch.device:
     """Prepare a notebook session. Call this in the first cell.
 
-    Enables autoreload of edited modules, applies the project figure style,
-    and seeds the random generators.
+    Enables autoreload of edited modules, applies the project figure style, seeds the
+    random generators, and sets the directories of the figures and the tables.
 
     Args:
-        seed: Seed for the Python, NumPy, and PyTorch random generators.
+        cfg: The configuration from `load_config`. The function uses `seed` and `output`.
 
     Returns:
         The device that models and tensors must use.
@@ -28,5 +30,6 @@ def setup_notebook(seed: int = 0) -> torch.device:
     shell.run_line_magic("load_ext", "autoreload")
     shell.run_line_magic("autoreload", "2")
     configure_matplotlib()
-    seed_everything(seed)
+    seed_everything(cfg.seed)
+    configure_output(cfg.output)
     return get_device()

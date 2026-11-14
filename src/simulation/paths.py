@@ -69,18 +69,23 @@ def _remove_cells(scene: sionna.rt.Scene, cells: Sequence[Cell]) -> None:
 
 
 def _gain_tensor(
-    scene: sionna.rt.Scene, positions: np.ndarray, solver: DictConfig, loop_mode: str
+    scene: sionna.rt.Scene,
+    positions: np.ndarray,
+    solver: DictConfig,
+    loop_mode: str,
+    deterministic: bool,
 ) -> mi.TensorXf:
     """Return the path gain from each transmitter to each position, with shape `[n, num_tx]`.
 
     `loop_mode` is the loop mode of the Sionna RT `PathSolver`. Only "evaluated" lets
-    Dr.Jit calculate gradients through the result.
+    Dr.Jit calculate gradients through the result. `deterministic` is the argument of the
+    `PathSolver` constructor.
     """
     names = [f"ue{i}" for i in range(len(positions))]
     for name, position in zip(names, positions, strict=True):
         scene.add(sionna.rt.Receiver(name, position=position.tolist()))
     try:
-        path_solver = sionna.rt.PathSolver()
+        path_solver = sionna.rt.PathSolver(deterministic=deterministic)
         path_solver.loop_mode = loop_mode
         paths = path_solver(scene, **solver)
         # Shape: [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths].
@@ -118,8 +123,9 @@ def compute_rsrp(
         positions: Receiver positions in meters, with shape `[n, 3]`.
         simulation: The configuration from `configs/simulation.yaml`. The function
             uses `radio` (`frequency_hz`, `subcarrier_spacing_hz`), `receiver` (the
-            arguments of the receiver `PlanarArray`), `solver` (the arguments of the
-            Sionna RT `PathSolver`), and `rx_batch_size`.
+            arguments of the receiver `PlanarArray`), `solver` (the arguments of a call
+            of the Sionna RT `PathSolver`), `deterministic` (the argument of its
+            constructor), and `rx_batch_size`.
 
     Returns:
         The RSRP in dBm, with shape `[n, len(cells)]`. A value is NaN if no path
@@ -136,7 +142,11 @@ def compute_rsrp(
     try:
         gains = [
             _gain_tensor(
-                scene, positions[start : start + batch], simulation.solver, "symbolic"
+                scene,
+                positions[start : start + batch],
+                simulation.solver,
+                "symbolic",
+                simulation.deterministic,
             ).numpy()
             for start in range(0, len(positions), batch)
         ]
@@ -166,7 +176,7 @@ def compute_rsrp_mw(
         cells: The cells. All cells must have the same array configuration.
         positions: Receiver positions in meters, with shape `[n, 3]` and `n` more than 0.
         simulation: The configuration from `configs/simulation.yaml`. The function
-            uses `radio`, `receiver`, and `solver`, as `compute_rsrp` does.
+            uses `radio`, `receiver`, `solver`, and `deterministic`, as `compute_rsrp` does.
 
     Returns:
         The RSRP in milliwatts, with shape `[n, len(cells)]`. A value is 0 if no path
@@ -182,7 +192,9 @@ def compute_rsrp_mw(
         raise ValueError("positions must have a minimum of one row.")
     _add_cells(scene, cells, simulation)
     try:
-        gain = _gain_tensor(scene, positions, simulation.solver, "evaluated")
+        gain = _gain_tensor(
+            scene, positions, simulation.solver, "evaluated", simulation.deterministic
+        )
     finally:
         _remove_cells(scene, cells)
     power_rs_mw = np.array([10.0 ** (cell.power_rs_dbm / 10.0) for cell in cells], dtype="f4")

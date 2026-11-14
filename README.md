@@ -153,13 +153,26 @@ The CUDA variants operate without LLVM.
 
 [Hydra](https://hydra.cc/) reads the configuration from [`configs/`](configs/).
 
-[`configs/config.yaml`](configs/config.yaml) is the root configuration:
+[`configs/config.yaml`](configs/config.yaml) is the root configuration. It loads each other
+file of `configs/` into its own key:
+
+| Key | File | Content |
+|---|---|---|
+| `scenario` | [`configs/scenario.yaml`](configs/scenario.yaml) | The synthetic scenario |
+| `simulation` | [`configs/simulation.yaml`](configs/simulation.yaml) | Sionna RT |
+| `calibration` | [`configs/calibration.yaml`](configs/calibration.yaml) | The data split and the material calibration |
+
+It also has these values:
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `seed` | integer | `0` | Seed for the random generators. |
+| `seed` | integer | `42` | The only seed: scenario generator, path solver (`simulation.solver.seed` is `${seed}`), data split, network, and calibration. |
+| `output.figures.dir` | string | `reports/figures` | Directory of the figures (PNG) of the notebooks. A relative path starts at the repository root. |
+| `output.tables.dir` | string | `reports/tables` | Directory of the tables (CSV) of the notebooks. |
+| `hydra.run.dir` | string | `outputs/scenario/<date>/<time>` | Run directory of `task scenario`. Hydra writes the configuration of the run (`.hydra/config.yaml`, `.hydra/overrides.yaml`) and the log there. |
 
-The scenario generator uses two files. Each file has a comment for each value.
+`task scenario` and `src.utils.load_config` compose this file in the same way. Each file has a
+comment for each value. No other file holds a copy of the configuration.
 
 [`configs/simulation.yaml`](configs/simulation.yaml) is the configuration of Sionna RT.
 These are the primary values:
@@ -170,22 +183,22 @@ These are the primary values:
 | `radio.frequency_hz` | number | `2.6e9` | Carrier frequency. |
 | `radio.subcarrier_spacing_hz` | number | `30e3` | Bandwidth of the scene: one resource element. |
 | `receiver` | mapping | 1 x 1 dipole, V | Planar array of the UE. |
-| `solver.max_depth` | integer | `8` | Maximum number of interactions of a path. |
-| `solver.samples_per_src` | integer | `1000000` | Number of rays for each source. |
+| `solver.max_depth` | integer | `5` | Maximum number of interactions of a path. |
+| `solver.samples_per_src` | integer | `100000` | Number of rays for each source. |
+| `solver.max_num_paths_per_src` | integer | `50000` | Size of the path buffer for each source. |
 | `solver.refraction` | boolean | `true` | With `true`, a signal can go through a wall. With `false`, an indoor position gets no signal. |
 | `solver.diffraction` | boolean | `true` | Diffraction at building edges. |
-| `rx_batch_size` | integer | `100` | Number of UE positions in one solver call. |
+| `deterministic` | boolean | `true` | Argument of the `PathSolver` constructor. With `true`, two runs with the same seed give the same paths. Set `false` if the GPU runs out of memory. |
+| `rx_batch_size` | integer | `10` | Number of UE positions in one solver call. |
 
-The `solver` block has all arguments of the Sionna RT `PathSolver`.
+The `solver` block has all arguments of a call of the Sionna RT `PathSolver`.
 The code gives the block to the solver without a change.
 
 [`configs/scenario.yaml`](configs/scenario.yaml) is the configuration of the test scenario.
-It loads `simulation.yaml` into its key `simulation`.
 These are the primary values:
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `seed` | integer | `0` | Seed for the random generators. |
 | `grid.tile_size_m` | number | `5` | Side of a tile of the grid for the height map, in meters. |
 | `grid.min_building_height_m` | number | `2` | A grid tile above this height is a building. |
 | `antenna.power_rs` | number | `4.85` | Reference-signal power for each resource element, in dBm. |
@@ -200,8 +213,8 @@ These are the primary values:
 | `measurement.rsrp_noise_mean_db` | number | `-5` | Mean of the RSRP measurement error, in dB. |
 | `measurement.min_rsrp_dbm` | number | `-140` | A cell below this RSRP is not in the record. |
 
-A value of `simulation.yaml` has the prefix `simulation.` in an override, for example
-`simulation.solver.max_depth=5`.
+An override names the key of the file, for example `scenario.sites.isd_m=600`,
+`simulation.solver.max_depth=5`, or `seed=1`.
 
 Precedence: command-line overrides, then the YAML files.
 
@@ -210,16 +223,23 @@ The project reads no environment variables and holds no secrets.
 ## Usage
 
 Call `setup_notebook` in the first cell of each notebook.
-The function enables module autoreload, applies the figure style, and seeds the random generators.
+The function enables module autoreload, applies the figure style, seeds the random generators
+with `seed`, and sets the output directories from `output`.
 It returns the device that tensors must use.
 
 ```python
-from src.utils import DATA_DIR, setup_notebook
+from src.utils import DATA_DIR, load_config, save_figure, save_table, setup_notebook
 
-device = setup_notebook(seed=0)
+cfg = load_config()
+device = setup_notebook(cfg)
 print(device)  # cuda
 print(DATA_DIR)  # <repository root>/data
 ```
+
+`save_figure(figure, "name")` writes `name.png` to `output.figures.dir`.
+`save_table(table, "name")` writes `name.csv` to `output.tables.dir`, with the index. It accepts a
+DataFrame or a styled DataFrame and returns its argument, thus it can wrap the last expression of
+a cell: `save_table(frame.style.set_caption("Table 1. ..."), "name")`.
 
 ### Scenario data
 
@@ -230,16 +250,17 @@ task scenario
 ```
 
 Without Task, use `uv run python -m src.scenario`. Put Hydra overrides after the command,
-for example `task scenario -- traffic.records_per_day=200 simulation.solver.max_depth=5`.
+for example `task scenario -- scenario.traffic.records_per_day=200 simulation.solver.max_depth=5`.
 The command prints the time of the RSRP calculation and the total time.
 
-The command writes three files to `data/raw/`. Each run replaces the files of the last run.
+The command writes two files to `data/raw/`. Each run replaces the files of the last run.
+Hydra keeps the configuration and the log of each run in `outputs/scenario/<date>/<time>/`.
+The notebooks read `configs/`, thus run `task scenario` again after a change of `configs/`.
 
 | File | Content |
 |---|---|
 | `cells.csv` | One row for each cell: `cell`, `site`, `x`, `y`, `z`, `azimuth_deg`, `downtilt_deg`, `power_rs_dbm`, and the array columns `num_rows`, `num_cols`, `vertical_spacing`, `horizontal_spacing`, `pattern`, `polarization`. |
 | `mdt.csv` | One row for each MDT record: `timestamp`, `x`, `y`, `z`, and one `rsrp_<cell>` column for each cell. An empty value shows that the UE did not receive the cell. [`src/core/mdt.py`](src/core/mdt.py) sets the column names. |
-| `scenario_config.yaml` | The configuration of the run. |
 
 Positions are in meters, in the coordinate system of the scene.
 
@@ -269,8 +290,8 @@ task notebook
 Without Task, use
 `uv run jupyter nbconvert --execute --to notebook --output-dir outputs/notebooks notebooks/00_scenario.ipynb`.
 The copy with the outputs is in `outputs/notebooks/`.
-The notebook also writes each figure as a PNG file with 300 dpi to `reports/figures/`.
-Git ignores `reports/`.
+The notebook also writes each figure as a PNG file with 300 dpi to `reports/figures/`, and each
+table as a CSV file to `reports/tables/`. Git ignores `reports/`.
 
 To use real data, write `cells.csv` and `mdt.csv` with the same columns.
 A converter from latitude and longitude to scene coordinates is not implemented.
@@ -307,8 +328,7 @@ task notebook -- notebooks/01_eda.ipynb
 writes it to `data/processed/`. It does not change a value. `validate_cells` and
 `validate_mdt` count the rows that break each rule. If a count is not zero, the notebook stops
 and writes no file. `split_records` then divides the records at random into the train,
-validation, and test parts. `split.fractions` and `seed` in
-[`configs/calibration.yaml`](configs/calibration.yaml) set the division. All rows of one
+validation, and test parts. `calibration.split.fractions` and `seed` set the division. All rows of one
 record go to the same part. The notebook does not need a GPU.
 
 ```bash
@@ -373,7 +393,6 @@ The notebook writes these files to `outputs/calibration/`:
 |---|---|
 | `calibration.npz` | The weights of the network, the network structure, the normalization of the positions, and the power scale. `src.calibration.load_calibration` reads it and gives a `NeuralRadioMaterial` and the scale. |
 | `history.csv` | The loss, the power scale, and the validation loss at each step |
-| `calibration_config.yaml` | The configuration of the run |
 
 The values in use in [`configs/calibration.yaml`](configs/calibration.yaml) and
 [`configs/simulation.yaml`](configs/simulation.yaml) are small. They let the calibration run on
@@ -409,7 +428,8 @@ radio-calibration/
 └── uv.lock           Locked dependency versions
 ```
 
-Git ignores `data/` and `outputs/`. Put data sets in `data/`. Hydra writes run results to `outputs/`.
+Git ignores `data/` and `outputs/`. Put data sets in `data/`. Hydra writes the run directories of
+`task scenario` to `outputs/scenario/`.
 
 ### Standards
 

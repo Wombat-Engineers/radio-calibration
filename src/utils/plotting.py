@@ -1,11 +1,6 @@
 """Shared matplotlib style for figures in a scientific report."""
 
-from pathlib import Path
-
 import matplotlib as mpl
-from matplotlib.figure import Figure
-
-from src.utils.paths import FIGURES_DIR
 
 # Widths of a figure in a two-column IEEE paper, in inches: 3.5 in for one column and
 # 7.16 in for two columns (IEEE Author Center, "Preparing your graphics").
@@ -51,20 +46,3 @@ def configure_matplotlib() -> None:
             "image.cmap": "viridis",
         }
     )
-
-
-def save_figure(figure: Figure, name: str, directory: Path = FIGURES_DIR) -> Path:
-    """Save a figure as a PNG file.
-
-    Args:
-        figure: The figure.
-        name: File name without the extension.
-        directory: Directory for the file. The function creates it if necessary.
-
-    Returns:
-        The path of the file.
-    """
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{name}.png"
-    figure.savefig(path)
-    return path
