@@ -1,0 +1,35 @@
+# Configuration of the material calibration (notebooks/03_material_calibration.ipynb).
+# The values in use are small: they let the calibration run on a GPU with 4 GB of memory.
+# A comment "Recommended" gives the value for a GPU with more memory.
+# The method is "Neural Materials" of arXiv:2311.18558, Section III-D.
+# notebooks/02_preprocessing.ipynb reads `seed` and `split`.
+# The Sionna RT configuration is in configs/simulation.yaml.
+
+seed: 0
+
+# Random division of the MDT records: train, validation, test.
+# The proportions agree with arXiv:2311.18558, Section IV-C.
+split:
+  fractions: [0.5, 0.01, 0.49]
+
+# Multilayer perceptron that gives the material properties at a position.
+# The recommended values are from arXiv:2311.18558, Section IV-C.
+network:
+  # Number of frequencies of the positional encoding (Eq. 36).
+  encoding_octaves: 4             # Recommended: 10
+  hidden_layers: 2                # Recommended: 4
+  hidden_units: 32                # Recommended: 128
+
+# AdamW optimizer. The paper uses Adam, which is AdamW with no weight decay.
+# Assumption: the value is from Section IV-B. The paper gives no value for Neural Materials.
+learning_rate: 0.01
+# Assumption.
+weight_decay: 0.01
+# Number of gradient steps. Assumption.
+num_steps: 50                     # Recommended: 3000
+# Number of MDT records in one gradient step. Assumption.
+batch_size: 8                     # Recommended: 16
+# The calibration calculates the validation loss after each interval of steps. Assumption.
+validation_interval: 10           # Recommended: 100
+# Decay of the moving average of the power scale (Eq. 42). Assumption.
+scale_decay: 0.9

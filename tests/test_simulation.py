@@ -1,10 +1,20 @@
 """Tests for src.simulation. They use a small scene and CUDA."""
 
+import drjit as dr
 import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
-from src.simulation import building_height_map, compute_rsrp, is_outdoor, load_rt_scene
+from src.simulation import (
+    NeuralRadioMaterial,
+    apply_neural_material,
+    building_height_map,
+    compute_rsrp,
+    compute_rsrp_mw,
+    is_outdoor,
+    load_rt_scene,
+    make_material_network,
+)
 from tests.test_core import make_cell
 
 # In `simple_street_canyon`, the street is along the x axis and buildings are on each side.
@@ -138,3 +148,152 @@ def test_compute_rsrp_unknown_solver_key(scene):
         compute_rsrp(scene, CELLS, np.array([STREET]), unknown)
     assert len(scene.transmitters) == 0
     assert len(scene.receivers) == 0
+
+
+# --- compute_rsrp_mw ---
+
+
+def test_compute_rsrp_mw_matches_compute_rsrp(scene):
+    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
+
+    power_mw = compute_rsrp_mw(scene, CELLS, positions, SIMULATION).numpy()
+
+    np.testing.assert_allclose(
+        10.0 * np.log10(power_mw), compute_rsrp(scene, CELLS, positions, SIMULATION), atol=1.0
+    )
+
+
+def test_compute_rsrp_mw_no_path_is_zero(scene):
+    power_mw = compute_rsrp_mw(scene, CELLS, np.array([IN_BUILDING]), SIMULATION).numpy()
+
+    assert power_mw.shape == (1, 2)
+    assert (power_mw == 0).all()
+
+
+def test_compute_rsrp_mw_cleans_scene(scene):
+    compute_rsrp_mw(scene, CELLS, np.array([STREET]), SIMULATION)
+
+    assert len(scene.transmitters) == 0
+    assert len(scene.receivers) == 0
+
+
+@pytest.mark.parametrize("positions", [np.zeros((4, 2)), np.zeros((0, 3))])
+def test_compute_rsrp_mw_bad_positions(scene, positions):
+    with pytest.raises(ValueError, match="positions"):
+        compute_rsrp_mw(scene, CELLS, positions, SIMULATION)
+
+
+# --- NeuralRadioMaterial ---
+
+# A small network: the GPU of the development machine has 4 GB of memory.
+NETWORK = {"encoding_octaves": 2, "hidden_layers": 1, "hidden_units": 8}
+POINTS = np.array([[0.0, 0.0, 0.0], [20.0, 5.0, 3.0], [-40.0, 30.0, 10.0]])
+
+
+def weights_of(network) -> np.ndarray:
+    return np.array(network["weights"], dtype=np.float32)
+
+
+@pytest.fixture
+def neural_scene():
+    """A new scene for each test: the neural material replaces the materials of the scene."""
+    scene = load_rt_scene("simple_street_canyon")
+    material = apply_neural_material(scene, make_material_network(**NETWORK, seed=1))
+    return scene, material
+
+
+def test_make_material_network_seed():
+    first = weights_of(make_material_network(**NETWORK, seed=1))
+
+    np.testing.assert_array_equal(first, weights_of(make_material_network(**NETWORK, seed=1)))
+    assert (first != weights_of(make_material_network(**NETWORK, seed=2))).any()
+
+
+@pytest.mark.parametrize("name", list(NETWORK))
+def test_make_material_network_bad_size(name):
+    with pytest.raises(ValueError, match=name):
+        make_material_network(**(NETWORK | {name: 0}), seed=1)
+
+
+def test_values_at_ranges(neural_scene):
+    _, material = neural_scene
+    values = material.values_at(POINTS)
+
+    assert (values.relative_permittivity.numpy() > 1).all()
+    assert (values.conductivity.numpy() > 0).all()
+    assert (values.thickness.numpy() > 0).all()
+    for coefficient in (values.scattering_coefficient, values.xpd_coefficient):
+        assert ((coefficient.numpy() > 0) & (coefficient.numpy() < 1)).all()
+
+
+def test_values_at_depends_on_position(neural_scene):
+    _, material = neural_scene
+    conductivity = material.values_at(POINTS).conductivity.numpy()
+
+    assert conductivity.shape == (len(POINTS),)
+    assert len(np.unique(conductivity)) == len(POINTS)
+
+
+def test_apply_neural_material_all_objects(neural_scene):
+    scene, material = neural_scene
+
+    assert all(obj.radio_material is material for obj in scene.objects.values())
+
+
+def test_apply_neural_material_survives_frequency(neural_scene):
+    scene, material = neural_scene
+    before = material.values_at(POINTS).conductivity.numpy()
+
+    scene.frequency = SIMULATION.radio.frequency_hz
+
+    np.testing.assert_array_equal(material.values_at(POINTS).conductivity.numpy(), before)
+
+
+def test_compute_rsrp_with_neural_material(neural_scene):
+    scene, _ = neural_scene
+    rsrp = compute_rsrp(scene, CELLS, np.array([STREET]), SIMULATION)
+
+    assert rsrp.shape == (1, 2)
+    assert np.isfinite(rsrp).all()
+
+
+def test_compute_rsrp_mw_gradient(neural_scene):
+    scene, material = neural_scene
+    # No weight decay: only a gradient can change the weights.
+    optimizer = dr.opt.AdamW(lr=1e-2, weight_decay=0.0)
+    optimizer.update(material.network)
+    material.network.update(optimizer)
+    before = weights_of(material.network)
+
+    power_mw = compute_rsrp_mw(scene, CELLS, np.array([STREET]), SIMULATION)
+    dr.backward(dr.sum(power_mw, axis=None))
+    optimizer.step()
+    material.network.update(optimizer)
+
+    assert (weights_of(material.network) != before).any()
+
+
+def test_state_round_trip(neural_scene):
+    _, material = neural_scene
+    copy = NeuralRadioMaterial.from_state(material.state(), "copy")
+
+    for value, expected in zip(copy.values_at(POINTS), material.values_at(POINTS), strict=True):
+        np.testing.assert_array_equal(value.numpy(), expected.numpy())
+
+
+def test_from_state_missing_key(neural_scene):
+    _, material = neural_scene
+    state = material.state()
+    del state["weights"]
+
+    with pytest.raises(ValueError, match="weights"):
+        NeuralRadioMaterial.from_state(state, "copy")
+
+
+def test_from_state_wrong_weight_count(neural_scene):
+    _, material = neural_scene
+    state = material.state()
+    state["weights"] = state["weights"][:-1]
+
+    with pytest.raises(ValueError, match="weights"):
+        NeuralRadioMaterial.from_state(state, "copy")

@@ -23,7 +23,10 @@ The result depends on the scene geometry, the material parameters, and the anten
 These inputs are approximate, so a simulated radio map differs from a measured radio map.
 
 This project calibrates the simulated radio map with measurements.
-The calibration method is not documented yet.
+The calibration method is "Neural Materials" of Hoydis et al.,
+[Learning Radio Environments by Differentiable Ray Tracing](https://arxiv.org/abs/2311.18558).
+A neural network gives the material properties at each point of the scene. Gradient descent
+changes the network until the simulated RSRP agrees with the measured RSRP.
 
 ### Capabilities
 
@@ -33,16 +36,20 @@ The repository contains these parts:
 - A scenario generator. It puts 3 sites with 3 cells each in a Sionna RT scene and writes
   synthetic MDT (minimization of drive tests) records. See [Scenario data](#scenario-data).
 - Sionna RT functions that load a scene, measure the building heights, and calculate RSRP.
+- A radio material for Sionna RT that gets its properties from a neural network
+  (`NeuralRadioMaterial`). A training loop calibrates this network against the MDT records.
+  See [Material calibration](#material-calibration).
 - Shared utilities for paths, figure style, random seeds, device selection, and notebook setup.
 - Tests for each package, with Sionna RT on the CUDA backend.
 - A notebook that examines the scenario data.
 - A notebook for the exploratory data analysis (EDA) of the MDT records.
-- Validation rules for `cells.csv` and `mdt.csv`, and a notebook that validates the data and
-  writes it to `data/processed/` in the Parquet format. See
+- Validation rules for `cells.csv` and `mdt.csv`, and a notebook that validates the data.
+  The notebook divides the records into train, validation, and test parts and writes them to
+  `data/processed/` in the Parquet format. See
   [Exploratory analysis and preprocessing](#exploratory-analysis-and-preprocessing).
-- Two empty notebooks for modeling and evaluation.
-
-_Calibration capabilities: not documented yet._
+- A notebook that calibrates the materials and compares the result with the ITU materials
+  of the scene.
+- One empty notebook for the evaluation.
 
 ### Non-goals
 
@@ -50,8 +57,8 @@ _Not documented yet._
 
 ## Architecture
 
-The diagram shows the data flow of the scenario generator.
-The calibration model is not implemented.
+The first diagram shows the data flow of the scenario generator.
+[Material calibration](#material-calibration) shows the data flow of the calibration.
 
 ```mermaid
 flowchart LR
@@ -73,12 +80,13 @@ flowchart LR
 | Component | Responsibility | Location |
 |---|---|---|
 | Core | The `Cell` record, the format of `cells.csv`, and the column names of `mdt.csv` | [`src/core/`](src/core/) |
-| Data | Validation rules of `cells.csv` and `mdt.csv`, and the long format of `data/processed/`. It has no Sionna RT import. | [`src/data/`](src/data/) |
-| Simulation | All Sionna RT calls: scene load, building heights, RSRP from the path solver | [`src/simulation/`](src/simulation/) |
+| Data | Validation rules of `cells.csv` and `mdt.csv`, the long format of `data/processed/`, and the division into train, validation, and test parts. It has no Sionna RT import. | [`src/data/`](src/data/) |
+| Simulation | All Sionna RT calls: scene load, building heights, RSRP from the path solver, and the neural radio material | [`src/simulation/`](src/simulation/) |
+| Calibration | Loss, power scale, training loop, and file format of the calibration result. It uses Dr.Jit and has no Sionna RT import. | [`src/calibration/`](src/calibration/) |
 | Scenario | Site placement, traffic model, MDT records. It has no Sionna RT import. | [`src/scenario/`](src/scenario/) |
 | Utilities | Paths, figure style, random seeds, device selection, notebook setup | [`src/utils/`](src/utils/) |
 | Configuration | Hydra configuration files | [`configs/`](configs/) |
-| Notebooks | Exploration, preprocessing, modeling, evaluation | [`notebooks/`](notebooks/) |
+| Notebooks | Exploration, preprocessing, material calibration, evaluation | [`notebooks/`](notebooks/) |
 | Tests | Checks of the environment and of the utilities | [`tests/`](tests/) |
 
 ### External dependencies
@@ -87,7 +95,7 @@ flowchart LR
 |---|---|---|
 | [Sionna RT](https://github.com/NVlabs/sionna-rt) 2.2.0 | Ray tracer that computes radio maps | Critical |
 | [Mitsuba](https://github.com/mitsuba-renderer/mitsuba3) 3.9.1 | Renderer below Sionna RT. Sionna RT pins this version. | Critical |
-| [Dr.Jit](https://github.com/mitsuba-renderer/drjit) 1.5.0 | Just-in-time compiler below Mitsuba. Sionna RT pins this version. | Critical |
+| [Dr.Jit](https://github.com/mitsuba-renderer/drjit) 1.5.0 | Just-in-time compiler below Mitsuba. Sionna RT pins this version. The calibration uses its automatic differentiation, its neural network module, and its AdamW optimizer. | Critical |
 | [PyTorch](https://pytorch.org/) 2.15.0+cu134 | Calibration models and training | Critical |
 | [Hydra](https://hydra.cc/) | Experiment configuration | Critical |
 
@@ -279,7 +287,9 @@ flowchart LR
     pre --> val[src.data.validate_cells, src.data.validate_mdt]
     val -- all counts 0 --> long[src.data.mdt_to_long]
     val -- a count above 0 --> stop[AssertionError: no file]
-    long --> out[(data/processed)]
+    split_cfg[configs/calibration.yaml] --> split[src.data.split_records]
+    long --> split
+    split --> out[(data/processed)]
 ```
 
 [`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb) is the exploratory data analysis. It has
@@ -296,7 +306,10 @@ task notebook -- notebooks/01_eda.ipynb
 [`notebooks/02_preprocessing.ipynb`](notebooks/02_preprocessing.ipynb) validates the data and
 writes it to `data/processed/`. It does not change a value. `validate_cells` and
 `validate_mdt` count the rows that break each rule. If a count is not zero, the notebook stops
-and writes no file. The notebook does not need a GPU.
+and writes no file. `split_records` then divides the records at random into the train,
+validation, and test parts. `split.fractions` and `seed` in
+[`configs/calibration.yaml`](configs/calibration.yaml) set the division. All rows of one
+record go to the same part. The notebook does not need a GPU.
 
 ```bash
 task notebook -- notebooks/02_preprocessing.ipynb
@@ -304,10 +317,76 @@ task notebook -- notebooks/02_preprocessing.ipynb
 
 | File | Content |
 |---|---|
-| `data/processed/mdt.parquet` | One row for each received (record, cell) pair: `record`, `timestamp`, `x`, `y`, `z`, `cell`, `rsrp_dbm`. `record` is the row index in `mdt.csv`, from 0. A missing RSRP gives no row. |
+| `data/processed/train.parquet` | The train records. One row for each received (record, cell) pair: `record`, `timestamp`, `x`, `y`, `z`, `cell`, `rsrp_dbm`. `record` is the row index in `mdt.csv`, from 0. A missing RSRP gives no row. |
+| `data/processed/validation.parquet` | The validation records, in the same format |
+| `data/processed/test.parquet` | The test records, in the same format |
 | `data/processed/cells.parquet` | The content of `cells.csv` |
 
-_Calibration usage: not documented yet._
+The notebook does not write `data/processed/mdt.parquet`. A file with this name is from an
+older version of the notebook.
+
+### Material calibration
+
+[`notebooks/03_material_calibration.ipynb`](notebooks/03_material_calibration.ipynb) explains
+and runs the calibration. Run `task scenario` and `notebooks/02_preprocessing.ipynb` first.
+
+```mermaid
+flowchart LR
+    net[src.simulation.make_material_network] --> mat[src.simulation.NeuralRadioMaterial]
+    mat -- apply_neural_material --> scene[Sionna RT scene]
+    scene --> rsrp[src.simulation.compute_rsrp_mw]
+    train[(data/processed/train.parquet)] --> scale[src.calibration.scale_estimate]
+    rsrp --> scale
+    scale --> loss[src.calibration.smape]
+    rsrp --> loss
+    loss -- gradient --> opt[drjit.opt.AdamW]
+    opt -- new weights --> net
+```
+
+The parts of the method are these:
+
+- **Material.** `NeuralRadioMaterial` is a subclass of the Sionna RT `RadioMaterial`. One
+  multilayer perceptron gives the relative permittivity, the conductivity, the scattering
+  coefficient, the XPD coefficient, and the thickness at the point of each ray interaction.
+  All objects of the scene get the same material. The file
+  [`src/simulation/neural_material.py`](src/simulation/neural_material.py) imports only
+  Sionna RT, Mitsuba, Dr.Jit, and NumPy.
+- **Loss.** The loss is the power term of the loss of the paper: the symmetric absolute
+  percentage error between the measured RSRP and the simulated RSRP, in linear power. The
+  MDT records have no delay spread, thus the delay spread term of the paper is not used.
+- **Power scale.** A scale multiplies the measured power. Each step estimates it in closed
+  form, and an exponential moving average smooths it.
+- **Optimizer.** AdamW from Dr.Jit. The path solver runs with the loop mode `evaluated`,
+  because Sionna RT gives no gradients in the loop mode `symbolic`.
+
+[`configs/calibration.yaml`](configs/calibration.yaml) sets the network, the optimizer, the
+number of steps, and the batch size. The Sionna RT configuration stays in
+[`configs/simulation.yaml`](configs/simulation.yaml).
+
+```bash
+task notebook -- notebooks/03_material_calibration.ipynb
+```
+
+The notebook writes these files to `outputs/calibration/`:
+
+| File | Content |
+|---|---|
+| `calibration.npz` | The weights of the network, the network structure, the normalization of the positions, and the power scale. `src.calibration.load_calibration` reads it and gives a `NeuralRadioMaterial` and the scale. |
+| `history.csv` | The loss, the power scale, and the validation loss at each step |
+| `calibration_config.yaml` | The configuration of the run |
+
+The values in use in [`configs/calibration.yaml`](configs/calibration.yaml) and
+[`configs/simulation.yaml`](configs/simulation.yaml) are small. They let the calibration run on
+a GPU with 4 GB of memory. A comment `Recommended` beside a value gives the value for a GPU
+with more memory. The recommended network size is that of the paper.
+
+With the recommended values, one gradient step did not complete in 10 minutes on the 4 GB
+development GPU. The largest part of the memory is the path buffer: Sionna RT allocates it for
+`solver.max_num_paths_per_src` paths before it traces the rays.
+
+The scenario generator uses the same solver values. After a change of a solver value, run
+`task scenario` and `notebooks/02_preprocessing.ipynb` again before the calibration. The tests
+use a small scene and a small network.
 
 ## Development
 
@@ -318,10 +397,11 @@ radio-calibration/
 ├── configs/          Hydra configuration
 ├── notebooks/        Jupyter notebooks, numbered in the order of the workflow
 ├── src/              Python package (import name: src)
+│   ├── calibration/  Loss, power scale, training loop, result file
 │   ├── core/         Cell record, cells.csv format, mdt.csv column names
-│   ├── data/         Validation rules, long format of data/processed
+│   ├── data/         Validation rules, long format and parts of data/processed
 │   ├── scenario/     Scenario generator: sites, traffic, MDT records
-│   ├── simulation/   Sionna RT calls: scene, building heights, RSRP
+│   ├── simulation/   Sionna RT calls: scene, building heights, RSRP, neural material
 │   └── utils/        Paths, figure style, seeds, device, notebook setup
 ├── tests/            pytest tests
 ├── Taskfile.yml      Task definitions
@@ -364,6 +444,7 @@ uv run pytest
 | Unit | `src/data` | `uv run pytest tests/test_data.py` | Local machine |
 | Unit | `src/simulation`, with the scene `simple_street_canyon` | `uv run pytest tests/test_simulation.py` | Local machine with an NVIDIA GPU |
 | Unit | `src/scenario`. One test runs the full generator on a small scene. | `uv run pytest tests/test_scenario.py` | Local machine with an NVIDIA GPU |
+| Unit | `src/calibration`, with the scene `simple_street_canyon` and a small network | `uv run pytest tests/test_calibration.py` | Local machine with an NVIDIA GPU |
 
 Run one test:
 

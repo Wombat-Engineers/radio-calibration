@@ -20,19 +20,23 @@ receiver:
   polarization: "V"
 
 # Arguments of the Sionna RT PathSolver.
+# The values in use are small: they let the calibration run on a GPU with 4 GB of memory.
+# A comment "Recommended" gives the value for a GPU with more memory.
 solver:
-  max_depth: 8
-  samples_per_src: 1000000
-  max_num_paths_per_src: 1000000  # default
+  max_depth: 5                    # Recommended: 8
+  samples_per_src: 100000         # Recommended: 1000000
+  # Sionna RT allocates the path buffer for this number of paths before it traces the rays.
+  max_num_paths_per_src: 50000    # Recommended: 1000000 (the default)
   synthetic_array: true           # default
   los: true                       # default
   specular_reflection: true       # default
-  diffuse_reflection: false       # default
+  # The calibration learns the scattering coefficient. It needs the diffuse reflections.
+  diffuse_reflection: true
   refraction: true
   diffraction: true
   edge_diffraction: false         # default
   diffraction_lit_region: true    # default
   seed: 42                        # default
 
-# Number of UE positions in one PathSolver call. Assumption: 100 fits a 4 GB GPU.
-rx_batch_size: 100
+# Number of UE positions in one PathSolver call. Assumption.
+rx_batch_size: 10                 # Recommended: 100
