@@ -10,6 +10,7 @@ from src.calibration import (
     calibrate,
     dbm_to_mw,
     load_calibration,
+    log_error,
     save_calibration,
     scale_estimate,
     smape,
@@ -119,6 +120,25 @@ def test_absolute_log_error_nan():
     error = absolute_log_error(np.array([np.nan, -90.0]), np.array([-90.0, np.nan]), scale=1.0)
 
     assert np.isnan(error).all()
+
+
+def test_log_error_sign():
+    measured = np.array([-80.0])
+    simulated = np.array([-85.0])
+
+    # The simulation is 5 dB below the measurement. A scale of 10 adds 10 dB.
+    np.testing.assert_allclose(log_error(measured, simulated, scale=1.0), 5.0)
+    np.testing.assert_allclose(log_error(measured, simulated, scale=10.0), 15.0)
+
+
+def test_absolute_log_error_is_abs():
+    rng = np.random.default_rng(0)
+    measured, simulated = rng.uniform(-120.0, -60.0, size=(2, 20))
+
+    np.testing.assert_array_equal(
+        absolute_log_error(measured, simulated, scale=2.0),
+        np.abs(log_error(measured, simulated, scale=2.0)),
+    )
 
 
 # --- calibrate, save_calibration, load_calibration ---

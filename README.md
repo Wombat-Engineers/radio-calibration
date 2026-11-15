@@ -83,8 +83,10 @@ flowchart LR
 | Data | Validation rules of `cells.csv` and `mdt.csv`, the long format of `data/processed/`, and the division into train, validation, and test parts. It has no Sionna RT import. | [`src/data/`](src/data/) |
 | Simulation | All Sionna RT calls: scene load, building heights, RSRP from the path solver, and the neural radio material | [`src/simulation/`](src/simulation/) |
 | Calibration | Loss, power scale, training loop, and file format of the calibration result. It uses Dr.Jit and has no Sionna RT import. | [`src/calibration/`](src/calibration/) |
+| Evaluation | Error statistics of a calibrated model against the measured RSRP. It has no Sionna RT, Mitsuba, or Dr.Jit import. | [`src/evaluation/`](src/evaluation/) |
 | Scenario | Site placement, traffic model, MDT records. It has no Sionna RT import. | [`src/scenario/`](src/scenario/) |
-| Utilities | Paths, figure style, random seeds, device selection, notebook setup | [`src/utils/`](src/utils/) |
+| Utilities | Paths, figure style, random seeds, device selection, notebook setup, steps and archive of a run | [`src/utils/`](src/utils/) |
+| Scripts | Runs of the pipeline or of the notebooks, with one archive of the results | [`scripts/`](scripts/) |
 | Configuration | Hydra configuration files | [`configs/`](configs/) |
 | Notebooks | Exploration, preprocessing, material calibration, evaluation | [`notebooks/`](notebooks/) |
 | Tests | Checks of the environment and of the utilities | [`tests/`](tests/) |
@@ -161,6 +163,7 @@ file of `configs/` into its own key:
 | `scenario` | [`configs/scenario.yaml`](configs/scenario.yaml) | The synthetic scenario |
 | `simulation` | [`configs/simulation.yaml`](configs/simulation.yaml) | Sionna RT |
 | `calibration` | [`configs/calibration.yaml`](configs/calibration.yaml) | The data split and the material calibration |
+| `evaluation` | [`configs/evaluation.yaml`](configs/evaluation.yaml) | The evaluation of the calibration |
 
 It also has these values:
 
@@ -207,7 +210,7 @@ These are the primary values:
 | `sites.mast_height_m` | number | `25` | Antenna height above the ground, in meters. |
 | `sites.downtilt_deg` | number | `5` | Downtilt of each cell, in degrees. |
 | `traffic.num_days` | integer | `1` | Number of days of MDT records. |
-| `traffic.records_per_day` | number | `1000` | Mean number of MDT records in one day. |
+| `traffic.records_per_day` | number | `500` | Mean number of MDT records in one day. The value in use is small for a local smoke test. The comment `Recommended` gives the value for a full run. |
 | `ue_height.mean_m` | number | `1.5` | Mean UE height above the ground, in meters. |
 | `ue_height.min_m`, `ue_height.max_m` | number | `0.5`, `2.5` | Limits of the UE height, in meters. |
 | `measurement.rsrp_noise_mean_db` | number | `-5` | Mean of the RSRP measurement error, in dB. |
@@ -394,10 +397,7 @@ The notebook writes these files to `outputs/calibration/`:
 | `calibration.npz` | The weights of the network, the network structure, the normalization of the positions, and the power scale. `src.calibration.load_calibration` reads it and gives a `NeuralRadioMaterial` and the scale. |
 | `history.csv` | The loss, the power scale, and the validation loss at each step |
 
-The simulated RSRP is the same in each run, bit for bit. The calibration is not: Dr.Jit adds
-the gradients on the GPU with atomic float operations, in an order that changes from run to run.
-Small differences then grow during the gradient steps, thus notebook 03 gives slightly different
-results in each run. Report the result of more than one run with its spread.
+Each run gives different weights. [Reproducibility](#reproducibility) gives the cause.
 
 The values in use in [`configs/calibration.yaml`](configs/calibration.yaml) and
 [`configs/simulation.yaml`](configs/simulation.yaml) are small. They let the calibration run on
@@ -412,6 +412,77 @@ The scenario generator uses the same solver values. After a change of a solver v
 `task scenario` and `notebooks/02_preprocessing.ipynb` again before the calibration. The tests
 use a small scene and a small network.
 
+### Evaluation
+
+The notebook [`notebooks/04_evaluation.ipynb`](notebooks/04_evaluation.ipynb) measures the
+error of the calibrated material on the test records. It compares three models:
+
+| Model | Materials | Power scale |
+|---|---|---|
+| ITU materials | The materials of the scene file. The scenario generator used them, thus they give the lowest possible error. | Least squares on the train records |
+| Initial neural material | The network before the calibration | Least squares on the train records |
+| Calibrated neural material | The network of `outputs/calibration/calibration.npz` | The scale of the calibration |
+
+The notebook gives these results:
+
+- the bias, MAE, RMSE, standard deviation, quantiles of the absolute error, Pearson
+  correlation, and SMAPE of each model on the train and the test records;
+- the error by cell and by distance from the cell;
+- the error by distance to the nearest train record, because a random division puts test
+  records near train records ([Dempsey et al.](https://arxiv.org/abs/2411.17752));
+- the difference of the MAE of two models, with a bootstrap interval over the records.
+
+[`configs/evaluation.yaml`](configs/evaluation.yaml) sets the quantiles, the number of
+distance bands, and the bootstrap. The functions are in
+[`src/evaluation/`](src/evaluation/). Run the notebook after notebook 03:
+
+```bash
+task notebook -- notebooks/04_evaluation.ipynb
+```
+
+### Reproducibility
+
+The simulated RSRP is the same in each run, bit for bit. The calibration is not. The
+backward pass of the material network (Dr.Jit `nn.CoopVec` on CUDA) adds the gradients of
+the weights with atomic float operations. The order of these additions changes from run to
+run. The first step is the same in each run. After it, small differences grow during the
+gradient steps, thus notebook 03 gives different weights, losses, power scales, and errors in
+each run. The difference between two runs can be as large as the effect of the calibration.
+No Dr.Jit flag changes this, and a fixed seed does not change it. Report the result of more
+than one run with its spread.
+
+### Runs on another machine
+
+The values in use are small for the local GPU. Use two scripts to run the project with
+larger values on a machine with a larger GPU, then analyze the results on the local machine.
+
+| Command | Script | Steps |
+|---|---|---|
+| `task pipeline` | [`scripts/run_pipeline.py`](scripts/run_pipeline.py) | `python -m src.scenario`, then all notebooks in the order of their names |
+| `task notebooks -- <notebook> ...` | [`scripts/run_notebooks.py`](scripts/run_notebooks.py) | The given notebooks, or all notebooks, on the data that exists |
+
+Each script stops at the first step that fails. It always writes one archive
+`outputs/archives/<start time>.zip`, also after a failure. The archive has:
+
+- `data/raw/`, `data/processed/`, `outputs/calibration/`, `outputs/notebooks/`, and the
+  figure and table directories;
+- `configs/`: the YAML files of the run;
+- `config.yaml`: the composed configuration that the notebooks read;
+- `manifest.json`: the status (`ok` or `failed`), the time and the exit code of each step,
+  the git commit, the package versions, and the GPU;
+- for `task pipeline`, the Hydra record of the scenario run in `outputs/scenario/`.
+
+Do these steps:
+
+1. On the other machine, clone the repository and run `uv sync`.
+2. Change the values in `configs/` to the values of the `Recommended` comments.
+3. Run `task pipeline`. Without Task, use `uv run python scripts/run_pipeline.py`.
+4. Copy the archive to `outputs/archives/` on the local machine, for example with `scp`.
+5. On the local machine, run `task unpack -- outputs/archives/<start time>.zip`.
+
+`task unpack` extracts the archive to `outputs/remote/<start time>/`. The local results do
+not change.
+
 ## Development
 
 ### Layout
@@ -424,9 +495,11 @@ radio-calibration/
 │   ├── calibration/  Loss, power scale, training loop, result file
 │   ├── core/         Cell record, cells.csv format, mdt.csv column names
 │   ├── data/         Validation rules, long format and parts of data/processed
+│   ├── evaluation/   Error statistics of a calibrated model
 │   ├── scenario/     Scenario generator: sites, traffic, MDT records
 │   ├── simulation/   Sionna RT calls: scene, building heights, RSRP, neural material
-│   └── utils/        Paths, figure style, seeds, device, notebook setup
+│   └── utils/        Paths, figure style, seeds, device, notebook setup, run steps
+├── scripts/          Runs of the pipeline and of the notebooks, with an archive
 ├── tests/            pytest tests
 ├── Taskfile.yml      Task definitions
 ├── pyproject.toml    Dependencies and tool configuration
@@ -470,6 +543,7 @@ uv run pytest
 | Unit | `src/simulation`, with the scene `simple_street_canyon` | `uv run pytest tests/test_simulation.py` | Local machine with an NVIDIA GPU |
 | Unit | `src/scenario`. One test runs the full generator on a small scene. | `uv run pytest tests/test_scenario.py` | Local machine with an NVIDIA GPU |
 | Unit | `src/calibration`, with the scene `simple_street_canyon` and a small network | `uv run pytest tests/test_calibration.py` | Local machine with an NVIDIA GPU |
+| Unit | `src/evaluation` | `uv run pytest tests/test_evaluation.py` | Local machine with an NVIDIA GPU. The tests do no ray tracing, but `src.calibration` loads the CUDA variant. |
 
 Run one test:
 
@@ -486,6 +560,9 @@ Continuous integration and a coverage floor are not set.
 | Ray tracer | Hoydis et al., [Sionna RT: Differentiable Ray Tracing for Radio Propagation Modeling](https://arxiv.org/abs/2303.11103), 2023. The paper shows that gradient descent can learn radio materials. |
 | Ray tracer | Aït Aoudia et al., [Sionna RT: Technical Report](https://arxiv.org/abs/2504.21719), 2025. The report describes the path solver and the radio map solver. |
 | Calibration by gradient descent | Hoydis et al., [Learning Radio Environments by Differentiable Ray Tracing](https://arxiv.org/abs/2311.18558), IEEE TMLCN, 2024. The method calibrates material properties, scattering, and antenna patterns against channel measurements. |
+| Evaluation of a calibration | Bakirtzis et al., [To Differentiate or To Deep Learn](https://arxiv.org/abs/2509.19337), 2025. The study compares a calibrated ray tracer with deep learning on operator RSRP. It reports RMSE, MAE, the correlation, and SMAPE. |
+| Evaluation of a calibration | Sun et al., [campus 5G NR drive-test data set](https://doi.org/10.1016/j.dib.2026.113364), Data in Brief, 2026. The study tests a Sionna RT model on trajectories that the calibration did not use. It reports the bias, the standard deviation, and high percentiles of the error. |
+| Spatial validation | Dempsey et al., [arXiv:2411.17752](https://arxiv.org/abs/2411.17752), 2024. A random division of spatial data can put information of the test data into the train data. |
 | Calibration with phase errors | Ruah et al., [Calibrating Wireless Ray Tracing for Digital Twinning using Local Phase Error Estimates](https://arxiv.org/abs/2312.12625), 2023. The method models the phase errors that geometry errors cause. |
 | Calibration with signal strength | Chmela and Tripkovic, [Material Parameter Estimation for Sionna RT](https://doi.org/10.48436/ycw2e-xyw13), TU Wien, 2025. The code changes the material parameters to decrease the mean absolute error between simulated and measured signal strength. |
 | Calibration with few measurements | An et al., [Taming Vision Priors for Data Efficient mmWave Channel Modeling](https://arxiv.org/abs/2603.13383), 2026. A vision-language model gives initial material properties. A few dozen channel measurements then calibrate the ray tracer. |

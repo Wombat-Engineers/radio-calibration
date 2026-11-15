@@ -9,8 +9,8 @@ from src.utils.paths import CONFIG_DIR
 def load_config(*overrides: str) -> DictConfig:
     """Compose `configs/config.yaml` as `task scenario` composes it.
 
-    The result has the keys `seed`, `scenario`, `simulation`, and `calibration`. It has no
-    `hydra` key.
+    The result has the keys `seed`, `scenario`, `simulation`, `calibration`, `evaluation`,
+    and `output`. It has no `hydra` key.
 
     Args:
         overrides: Hydra overrides, for example `"scenario.sites.isd_m=60"`.

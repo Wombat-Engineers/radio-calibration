@@ -97,6 +97,44 @@ tasks:
     cmds:
       - uv run jupyter nbconvert --execute --to notebook --output-dir outputs/notebooks {{.CLI_ARGS | default "notebooks/00_scenario.ipynb"}}
 
+  pipeline:
+    desc: Run the scenario generator and all notebooks, then pack the results. Needs an NVIDIA GPU.
+    summary: |
+      Run "python -m src.scenario", then each notebook of notebooks/ in the order of the names.
+      The task uses the configuration in configs/. Change the YAML files before the run to use
+      other values. The task stops at the first step that fails. It always writes
+      outputs/archives/<start time>.zip with the data, the results, the configuration, and
+      manifest.json (status, steps, versions, GPU).
+
+      Example:
+        task pipeline
+    cmds:
+      - uv run python scripts/run_pipeline.py
+
+  notebooks:
+    desc: Run notebooks on the data that exists, then pack the results. Needs an NVIDIA GPU.
+    summary: |
+      Run the given notebooks in this order, or all notebooks of notebooks/ if you give none.
+      The task does not run the scenario generator. It stops at the first notebook that fails.
+      It always writes outputs/archives/<start time>.zip, as "task pipeline" does.
+
+      Examples:
+        task notebooks
+        task notebooks -- notebooks/03_material_calibration.ipynb notebooks/04_evaluation.ipynb
+    cmds:
+      - uv run python scripts/run_notebooks.py {{.CLI_ARGS}}
+
+  unpack:
+    desc: Extract an archive of "task pipeline" or "task notebooks" to outputs/remote.
+    summary: |
+      Extract a zip archive to outputs/remote/<archive name>/. The local results do not
+      change. Copy the archive from the other machine first, for example with scp.
+
+      Example:
+        task unpack -- outputs/archives/20261115-101500.zip
+    cmds:
+      - uv run python -m zipfile -e {{.CLI_ARGS}} outputs/remote
+
   hooks:
     desc: Run all pre-commit hooks on all files.
     summary: |

@@ -1,0 +1,17 @@
+# Configuration of the evaluation of the calibration (notebooks/04_evaluation.ipynb).
+# configs/config.yaml loads this file into its key `evaluation`.
+# The seed of the bootstrap is the root `seed` in configs/config.yaml.
+
+# Quantiles of the absolute error in dB. Sun et al., Data in Brief 2026,
+# DOI 10.1016/j.dib.2026.113364, report the 90th and the 95th percentiles.
+quantiles: [0.5, 0.9, 0.95]
+
+# Number of bands of equal size for the error as a function of a distance. Assumption.
+num_bins: 5
+
+# Bootstrap over the records for the difference of the mean absolute error of two models.
+bootstrap:
+  # Number of bootstrap samples. Assumption.
+  num_samples: 2000
+  # Probability that the interval contains the true difference. Assumption.
+  confidence: 0.95

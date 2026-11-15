@@ -1,5 +1,9 @@
 """Tests for src.utils."""
 
+import json
+import sys
+import zipfile
+
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,6 +26,14 @@ from src.utils import (
     save_table,
     seed_everything,
     setup_notebook,
+)
+from src.utils.runs import (
+    NOTEBOOK_OUTPUT_DIR,
+    environment_info,
+    notebook_command,
+    run_steps,
+    select_notebooks,
+    write_archive,
 )
 
 
@@ -162,3 +174,96 @@ def test_load_config_override():
 def test_load_config_unknown_key():
     with pytest.raises(ConfigCompositionException):
         load_config("scenario.nope=1")
+
+
+def test_load_config_evaluation():
+    evaluation = load_config().evaluation
+
+    assert all(0 <= quantile <= 1 for quantile in evaluation.quantiles)
+    assert 0 < evaluation.bootstrap.confidence < 1
+
+
+# --- runs ---
+
+
+def test_select_notebooks_default():
+    notebooks = select_notebooks([])
+
+    assert notebooks == sorted(notebooks)
+    assert "04_evaluation.ipynb" in [path.name for path in notebooks]
+
+
+def test_select_notebooks_given():
+    assert select_notebooks(["notebooks/04_evaluation.ipynb"]) == [
+        (PROJECT_ROOT / "notebooks" / "04_evaluation.ipynb").resolve()
+    ]
+
+
+@pytest.mark.parametrize(
+    "name", ["README.md", "notebooks/../README.md", "../x.ipynb", "notebooks/nosuch.ipynb"]
+)
+def test_select_notebooks_outside(name):
+    with pytest.raises(ValueError, match="not a notebook"):
+        select_notebooks([name])
+
+
+def test_notebook_command_output_dir():
+    command = notebook_command(PROJECT_ROOT / "notebooks" / "04_evaluation.ipynb")
+
+    assert command[:4] == [sys.executable, "-m", "jupyter", "nbconvert"]
+    assert command[command.index("--output-dir") + 1] == str(NOTEBOOK_OUTPUT_DIR)
+
+
+def test_run_steps_stops_at_failure():
+    steps = run_steps(
+        [
+            [sys.executable, "-c", "pass"],
+            [sys.executable, "-c", "raise SystemExit(3)"],
+            [sys.executable, "-c", "pass"],
+        ]
+    )
+
+    assert [step.returncode for step in steps] == [0, 3]
+    assert all(step.seconds >= 0 for step in steps)
+
+
+def test_write_archive(tmp_path):
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.txt").write_text("a")
+    (root / "sub" / "b.txt").write_text("b")
+
+    archive = write_archive(
+        tmp_path / "archives",
+        "run1",
+        root,
+        [root / "a.txt", root / "sub", root / "missing"],
+        {"manifest.json": "{}"},
+    )
+
+    assert archive == tmp_path / "archives" / "run1.zip"
+    with zipfile.ZipFile(archive) as package:
+        assert sorted(package.namelist()) == ["run1/a.txt", "run1/manifest.json", "run1/sub/b.txt"]
+        assert package.read("run1/sub/b.txt") == b"b"
+
+
+@pytest.mark.parametrize("name", ["../x", "a/b", ""])
+def test_write_archive_bad_name(tmp_path, name):
+    with pytest.raises(ValueError, match="not permitted"):
+        write_archive(tmp_path, name, tmp_path, [], {})
+
+
+def test_write_archive_path_outside_root(tmp_path):
+    (tmp_path / "outside.txt").write_text("x")
+    (tmp_path / "root").mkdir()
+
+    with pytest.raises(ValueError):
+        write_archive(tmp_path, "run1", tmp_path / "root", [tmp_path / "outside.txt"], {})
+
+
+def test_environment_info_keys():
+    info = environment_info()
+
+    assert set(info) == {"python", "platform", "git_commit", "git_dirty", "packages", "gpus"}
+    assert set(info["packages"]) >= {"torch", "drjit", "mitsuba", "sionna-rt"}
+    json.dumps(info)

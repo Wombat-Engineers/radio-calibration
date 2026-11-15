@@ -41,8 +41,9 @@ traffic:
   start: "2026-01-05T00:00"
   num_days: 1
   slot_minutes: 15
-  # Mean number of MDT records in one day.
-  records_per_day: 1000
+  # Mean number of MDT records in one day. The value in use is small for a local smoke test.
+  # The comment "Recommended" gives the value for a full run.
+  records_per_day: 500             # Recommended: 1000
   # Half of the side of the square window for the building density.
   density_radius_m: 100.0
   # The business part of the traffic is in proportion to density ** business_exponent.

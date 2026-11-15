@@ -4,6 +4,7 @@ from src.calibration.io import load_calibration, save_calibration
 from src.calibration.loss import (
     absolute_log_error,
     dbm_to_mw,
+    log_error,
     scale_estimate,
     smape,
     update_scale,
@@ -16,6 +17,7 @@ __all__ = [
     "calibrate",
     "dbm_to_mw",
     "load_calibration",
+    "log_error",
     "save_calibration",
     "scale_estimate",
     "smape",

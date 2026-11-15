@@ -1,10 +1,12 @@
 # Root configuration. `task scenario` and `src.utils.load_config` compose this file.
-# Each file below goes into its own key: cfg.scenario, cfg.simulation, cfg.calibration.
+# Each file below goes into its own key: cfg.scenario, cfg.simulation, cfg.calibration,
+# cfg.evaluation.
 
 defaults:
   - scenario@scenario
   - simulation@simulation
   - calibration@calibration
+  - evaluation@evaluation
   - _self_
 
 # Seed of all random generators: scenario, path solver, data split, and calibration.
