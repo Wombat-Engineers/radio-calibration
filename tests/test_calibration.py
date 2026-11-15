@@ -11,6 +11,7 @@ from src.calibration import (
     dbm_to_mw,
     load_calibration,
     log_error,
+    received_powers,
     save_calibration,
     scale_estimate,
     smape,
@@ -139,6 +140,37 @@ def test_absolute_log_error_is_abs():
         absolute_log_error(measured, simulated, scale=2.0),
         np.abs(log_error(measured, simulated, scale=2.0)),
     )
+
+
+def test_received_powers_no_path_is_zero():
+    measured, simulated = received_powers(np.array([-80.0, -90.0]), np.array([-70.0, np.nan]))
+
+    np.testing.assert_allclose(measured, dbm_to_mw(np.array([-80.0, -90.0])))
+    np.testing.assert_allclose(simulated, [dbm_to_mw(-70.0), 0.0])
+
+
+def test_received_powers_drops_missing_measurement():
+    measured_dbm = np.array([[-80.0, np.nan], [np.nan, -90.0]])
+    simulated_dbm = np.array([[-81.0, -60.0], [-50.0, -91.0]])
+
+    measured, simulated = received_powers(measured_dbm, simulated_dbm)
+
+    np.testing.assert_allclose(measured, dbm_to_mw(np.array([-80.0, -90.0])))
+    np.testing.assert_allclose(simulated, dbm_to_mw(np.array([-81.0, -91.0])))
+
+
+def test_received_powers_scale_counts_no_path():
+    # A pair with no path stays in the sums of Eq. 43 with a simulated power of 0.
+    measured, simulated = received_powers(
+        10.0 * np.log10([1.0, 1.0]), np.array([10.0 * np.log10(2.0), np.nan])
+    )
+
+    assert scale_estimate(measured, simulated) == pytest.approx(1.0)
+
+
+def test_received_powers_shape():
+    with pytest.raises(ValueError, match="shapes"):
+        received_powers(np.zeros(2), np.zeros(3))
 
 
 # --- calibrate, save_calibration, load_calibration ---

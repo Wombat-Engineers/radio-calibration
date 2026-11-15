@@ -8,6 +8,37 @@ def dbm_to_mw(power_dbm: np.ndarray) -> np.ndarray:
     return 10.0 ** (np.asarray(power_dbm, dtype=float) / 10.0)
 
 
+def received_powers(
+    measured_dbm: np.ndarray, simulated_dbm: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the measured and the simulated powers of the received (record, cell) pairs.
+
+    A pair is received if its measured power is not NaN. A simulated NaN shows that no path
+    connects the cell and the record. It becomes a power of 0, not a missing pair: the pair
+    has a measurement, and the model gives no power for it.
+
+    Args:
+        measured_dbm: Measured powers in dBm. NaN shows a pair with no measurement.
+        simulated_dbm: Simulated powers in dBm, with the same shape. NaN shows no path.
+
+    Returns:
+        The measured and the simulated powers in milliwatts, each with one value for each
+        received pair, in row-major order.
+
+    Raises:
+        ValueError: If the two arrays do not have the same shape.
+    """
+    measured_dbm = np.asarray(measured_dbm, dtype=float)
+    simulated_dbm = np.asarray(simulated_dbm, dtype=float)
+    if measured_dbm.shape != simulated_dbm.shape:
+        raise ValueError(
+            f"The shapes must be equal, but they are {measured_dbm.shape} and "
+            f"{simulated_dbm.shape}."
+        )
+    received = np.isfinite(measured_dbm)
+    return dbm_to_mw(measured_dbm[received]), np.nan_to_num(dbm_to_mw(simulated_dbm[received]))
+
+
 def smape(measured, simulated):
     """Calculate the symmetric absolute percentage error of each pair of values.
 

@@ -10,7 +10,13 @@ import pandas as pd
 from drjit import nn
 from omegaconf import DictConfig
 
-from src.calibration.loss import dbm_to_mw, scale_estimate, smape, update_scale
+from src.calibration.loss import (
+    dbm_to_mw,
+    received_powers,
+    scale_estimate,
+    smape,
+    update_scale,
+)
 from src.core import Cell
 from src.simulation import compute_rsrp, compute_rsrp_mw
 
@@ -39,13 +45,12 @@ def _mean_loss(
     simulation: DictConfig,
 ) -> float:
     """Return the mean loss of the received (record, cell) pairs, without gradients."""
-    received = np.isfinite(rsrp_dbm)
-    if not received.any():
+    if not np.isfinite(rsrp_dbm).any():
         return float("nan")
-    # No path gives NaN in dBm. It is a power of 0.
-    simulated = np.nan_to_num(dbm_to_mw(compute_rsrp(scene, cells, positions, simulation)))
-    measured = scale * dbm_to_mw(rsrp_dbm[received])
-    return float(np.mean(smape(measured, simulated[received])))
+    measured, simulated = received_powers(
+        rsrp_dbm, compute_rsrp(scene, cells, positions, simulation)
+    )
+    return float(np.mean(smape(scale * measured, simulated)))
 
 
 def calibrate(
