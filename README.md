@@ -69,7 +69,7 @@ flowchart LR
     hm --> sites[src.scenario.sites.place_sites]
     hm --> mdt[src.scenario.mdt.sample_mdt]
     sites --> mdt
-    mdt -- positions --> rsrp[src.simulation.compute_rsrp]
+    mdt -- positions --> rsrp[src.simulation.compute_rsrp_dbm]
     rsrp -- RSRP --> mdt
     sites --> cells[(data/raw/cells.csv)]
     mdt --> out[(data/raw/mdt.csv)]
@@ -360,8 +360,9 @@ flowchart LR
     scene --> rsrp[src.simulation.compute_rsrp_mw]
     train[(data/processed/train.parquet)] --> scale[src.calibration.scale_estimate]
     rsrp --> scale
-    scale --> loss[src.calibration.smape]
+    scale -- NeuralRadioMaterial.scale --> loss[src.calibration.smape]
     rsrp --> loss
+    train --> loss
     loss -- gradient --> opt[drjit.opt.AdamW]
     opt -- new weights --> net
 ```
@@ -377,8 +378,12 @@ The parts of the method are these:
 - **Loss.** The loss is the power term of the loss of the paper: the symmetric absolute
   percentage error between the measured RSRP and the simulated RSRP, in linear power. The
   MDT records have no delay spread, thus the delay spread term of the paper is not used.
-- **Power scale.** A scale multiplies the measured power. Each step estimates it in closed
-  form, and an exponential moving average smooths it.
+- **Power scale.** The paper multiplies the measured power by a scale. Each step estimates
+  the scale in closed form from the simulated RSRP of the step, and an exponential moving
+  average smooths it. `NeuralRadioMaterial.scale` keeps the scale with the weights. Outside
+  the gradient step, the scale divides the simulated power: `compute_rsrp_dbm` and
+  `compute_rsrp_mw` apply it through their argument `scale`, and the measured RSRP has no
+  scale. The two forms give the same loss.
 - **Optimizer.** AdamW from Dr.Jit. The path solver runs with the loop mode `evaluated`,
   because Sionna RT gives no gradients in the loop mode `symbolic`.
 
@@ -394,7 +399,7 @@ The notebook writes these files to `outputs/calibration/`:
 
 | File | Content |
 |---|---|
-| `calibration.npz` | The weights of the network, the network structure, the normalization of the positions, and the power scale. `src.calibration.load_calibration` reads it and gives a `NeuralRadioMaterial` and the scale. |
+| `calibration.npz` | The weights of the network, the network structure, the normalization of the positions, and the power scale. `src.calibration.load_calibration` reads it and gives a `NeuralRadioMaterial` with its scale. |
 | `history.csv` | The loss, the power scale, and the validation loss at each step |
 
 Each run gives different weights. [Reproducibility](#reproducibility) gives the cause.
@@ -421,7 +426,7 @@ error of the calibrated material on the test records. It compares three models:
 |---|---|---|
 | ITU materials | The materials of the scene file. The scenario generator used them, thus they give the lowest possible error. | Least squares on the train records |
 | Initial neural material | The network before the calibration | Least squares on the train records |
-| Calibrated neural material | The network of `outputs/calibration/calibration.npz` | The scale of the calibration |
+| Calibrated neural material | The network of `outputs/calibration/calibration.npz` | `NeuralRadioMaterial.scale` from the calibration |
 
 The notebook gives these results:
 

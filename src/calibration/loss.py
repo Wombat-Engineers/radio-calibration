@@ -56,13 +56,15 @@ def smape(measured, simulated):
 
 
 def scale_estimate(measured: np.ndarray, simulated: np.ndarray) -> float:
-    """Estimate the factor that makes the measured powers agree with the simulated powers.
+    """Estimate the power scale that divides the simulated powers.
 
-    This is the least-squares solution of Eq. 43 of arXiv:2311.18558.
+    This is the least-squares solution of Eq. 43 of arXiv:2311.18558. The simulated
+    powers divided by the scale agree with the measured powers.
 
     Args:
         measured: Measured powers in a linear unit.
-        simulated: Simulated powers in the same unit, with the same shape.
+        simulated: Simulated powers in the same unit, with the same shape. They must have
+            no scale. A scaled power gives the wrong scale.
 
     Returns:
         The factor `alpha` that gives the minimum of the mean of
@@ -104,39 +106,36 @@ def update_scale(previous: float | None, estimate: float, decay: float) -> float
     return decay * previous + (1 - decay) * estimate
 
 
-def log_error(measured_dbm: np.ndarray, simulated_dbm: np.ndarray, scale: float) -> np.ndarray:
+def log_error(measured_dbm: np.ndarray, simulated_dbm: np.ndarray) -> np.ndarray:
     """Calculate the signed error between measured and simulated powers in decibels.
 
-    This is Eq. 44 of arXiv:2311.18558 without the absolute value. The scale multiplies the
-    measured power, as in Algorithm 1 of the paper. A positive error shows that the
-    simulated power is less than the scaled measured power.
+    This is Eq. 44 of arXiv:2311.18558 without the absolute value. A positive error shows
+    that the simulated power is less than the measured power.
 
     Args:
         measured_dbm: Measured powers in dBm.
-        simulated_dbm: Simulated powers in dBm, with the same shape.
-        scale: The linear power scale from the calibration.
+        simulated_dbm: Simulated powers in dBm, with the same shape. They must have the
+            power scale of the model (the argument `scale` of
+            `src.simulation.compute_rsrp_dbm`).
 
     Returns:
         The error in dB, with the shape of the inputs. A value is NaN if the measured
         power or the simulated power is NaN.
     """
-    return np.asarray(measured_dbm) + 10.0 * np.log10(scale) - np.asarray(simulated_dbm)
+    return np.asarray(measured_dbm) - np.asarray(simulated_dbm)
 
 
-def absolute_log_error(
-    measured_dbm: np.ndarray, simulated_dbm: np.ndarray, scale: float
-) -> np.ndarray:
+def absolute_log_error(measured_dbm: np.ndarray, simulated_dbm: np.ndarray) -> np.ndarray:
     """Calculate the absolute error between measured and simulated powers in decibels.
 
     This is Eq. 44 of arXiv:2311.18558: the absolute value of `log_error`.
 
     Args:
         measured_dbm: Measured powers in dBm.
-        simulated_dbm: Simulated powers in dBm, with the same shape.
-        scale: The linear power scale from the calibration.
+        simulated_dbm: Simulated powers in dBm with the power scale, as in `log_error`.
 
     Returns:
         The error in dB, with the shape of the inputs. A value is NaN if the measured
         power or the simulated power is NaN.
     """
-    return np.abs(log_error(measured_dbm, simulated_dbm, scale))
+    return np.abs(log_error(measured_dbm, simulated_dbm))

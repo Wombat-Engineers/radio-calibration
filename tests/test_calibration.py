@@ -109,27 +109,15 @@ def test_update_scale_bad_decay(decay):
         update_scale(1.0, 2.0, decay)
 
 
-def test_absolute_log_error_scale():
-    measured = np.array([-100.0, -90.0])
-
-    # A scale of 10 is 10 dB. The simulation is 10 dB above the measurement.
-    np.testing.assert_allclose(absolute_log_error(measured, measured + 10.0, scale=10.0), 0.0)
-    np.testing.assert_allclose(absolute_log_error(measured, measured, scale=10.0), 10.0)
-
-
 def test_absolute_log_error_nan():
-    error = absolute_log_error(np.array([np.nan, -90.0]), np.array([-90.0, np.nan]), scale=1.0)
+    error = absolute_log_error(np.array([np.nan, -90.0]), np.array([-90.0, np.nan]))
 
     assert np.isnan(error).all()
 
 
 def test_log_error_sign():
-    measured = np.array([-80.0])
-    simulated = np.array([-85.0])
-
-    # The simulation is 5 dB below the measurement. A scale of 10 adds 10 dB.
-    np.testing.assert_allclose(log_error(measured, simulated, scale=1.0), 5.0)
-    np.testing.assert_allclose(log_error(measured, simulated, scale=10.0), 15.0)
+    # The simulation is 5 dB below the measurement.
+    np.testing.assert_allclose(log_error(np.array([-80.0]), np.array([-85.0])), 5.0)
 
 
 def test_absolute_log_error_is_abs():
@@ -137,8 +125,7 @@ def test_absolute_log_error_is_abs():
     measured, simulated = rng.uniform(-120.0, -60.0, size=(2, 20))
 
     np.testing.assert_array_equal(
-        absolute_log_error(measured, simulated, scale=2.0),
-        np.abs(log_error(measured, simulated, scale=2.0)),
+        absolute_log_error(measured, simulated), np.abs(log_error(measured, simulated))
     )
 
 
@@ -190,7 +177,7 @@ def run_calibrate(neural_scene, rsrp_dbm=RSRP_DBM, **changes):
     return calibrate(
         scene,
         CELLS,
-        material.network,
+        material,
         POSITIONS,
         rsrp_dbm,
         (POSITIONS[:2], rsrp_dbm[:2]),
@@ -206,7 +193,14 @@ def test_calibrate_history_columns(neural_scene):
     assert list(result.history.columns) == ["step", "loss", "scale", "validation_loss"]
     assert result.history["step"].tolist() == [0, 1]
     assert np.isfinite(result.history.to_numpy()).all()
-    assert result.scale == result.history["scale"].iloc[-1]
+
+
+def test_calibrate_sets_material_scale(neural_scene):
+    _, material = neural_scene
+
+    result = run_calibrate(neural_scene)
+
+    assert material.scale == result.history["scale"].iloc[-1]
 
 
 def test_calibrate_validation_interval(neural_scene):
@@ -224,18 +218,33 @@ def test_calibrate_changes_network(neural_scene):
     assert (weights_of(material.network) != before).any()
 
 
-def test_calibrate_recovers_scale(neural_scene):
+def recovers_scale_case(neural_scene, factor: float) -> np.ndarray:
+    """Return a measurement that is the simulation divided by `factor`."""
     scene, _ = neural_scene
-    factor = 4.0
     simulated_mw = compute_rsrp_mw(scene, CELLS, POSITIONS, SIMULATION).numpy()
-    # The scale multiplies the measured power, thus the measurement is the simulation
-    # divided by the factor.
-    measured_dbm = 10.0 * np.log10(simulated_mw / factor)
+    return 10.0 * np.log10(simulated_mw / factor)
+
+
+def test_calibrate_recovers_scale(neural_scene):
+    _, material = neural_scene
+    measured_dbm = recovers_scale_case(neural_scene, factor=4.0)
 
     result = run_calibrate(neural_scene, measured_dbm, learning_rate=0.0, batch_size=4)
 
-    assert result.scale == pytest.approx(factor, rel=0.1)
+    # The scale divides the simulated power. A scale applied two times gives 2 or 16.
+    assert material.scale == pytest.approx(4.0, rel=0.1)
     assert result.history["loss"].iloc[0] < 0.1
+
+
+def test_calibrate_resets_scale(neural_scene):
+    _, material = neural_scene
+    measured_dbm = recovers_scale_case(neural_scene, factor=4.0)
+    material.scale = 100.0
+
+    result = run_calibrate(neural_scene, measured_dbm, learning_rate=0.0, batch_size=4)
+
+    # The first step does not start from the old scale of the material.
+    assert result.history["scale"].iloc[0] == pytest.approx(4.0, rel=0.1)
 
 
 def test_calibrate_cleans_scene(neural_scene):
@@ -254,7 +263,7 @@ def test_calibrate_no_record(neural_scene):
         calibrate(
             scene,
             CELLS,
-            material.network,
+            material,
             POSITIONS[:0],
             RSRP_DBM[:0],
             (POSITIONS, RSRP_DBM),
@@ -268,19 +277,29 @@ def test_save_load_calibration_round_trip(neural_scene, tmp_path):
     _, material = neural_scene
     path = tmp_path / "calibration.npz"
 
-    save_calibration(path, material, scale=2.5)
-    loaded, scale = load_calibration(path, "loaded")
+    material.scale = 2.5
 
-    assert scale == 2.5
+    save_calibration(path, material)
+    loaded = load_calibration(path, "loaded")
+
+    assert loaded.scale == 2.5
     for value, expected in zip(loaded.values_at(POINTS), material.values_at(POINTS), strict=True):
         np.testing.assert_array_equal(value.numpy(), expected.numpy())
 
 
 def test_save_calibration_bad_suffix(neural_scene, tmp_path):
     _, material = neural_scene
+    material.scale = 1.0
 
     with pytest.raises(ValueError, match="npz"):
-        save_calibration(tmp_path / "calibration.bin", material, scale=1.0)
+        save_calibration(tmp_path / "calibration.bin", material)
+
+
+def test_save_calibration_no_scale(neural_scene, tmp_path):
+    _, material = neural_scene
+
+    with pytest.raises(ValueError, match="scale"):
+        save_calibration(tmp_path / "calibration.npz", material)
 
 
 def test_load_calibration_missing_scale(neural_scene, tmp_path):

@@ -83,7 +83,7 @@ def pairs_with_errors(errors, records=None) -> pd.DataFrame:
 
 
 def test_pair_errors_rows():
-    pairs = pair_errors(PART, CELLS, SIMULATED, scale=1.0)
+    pairs = pair_errors(PART, CELLS, SIMULATED)
 
     assert list(pairs.columns) == list(PAIR_COLUMNS)
     assert len(pairs) == len(PART)
@@ -91,18 +91,15 @@ def test_pair_errors_rows():
 
 
 def test_pair_errors_values():
-    pairs = pair_errors(PART, CELLS, SIMULATED, scale=1.0)
+    pairs = pair_errors(PART, CELLS, SIMULATED)
 
     # -80 dBm measured and -85 dBm simulated give +5 dB.
     np.testing.assert_allclose(pairs["simulated_dbm"], [-85.0, -90.0, -70.0])
     np.testing.assert_allclose(pairs["error_db"], [5.0, 0.0, 0.0])
-    np.testing.assert_allclose(
-        pair_errors(PART, CELLS, SIMULATED, scale=10.0)["error_db"], [15.0, 10.0, 10.0]
-    )
 
 
 def test_pair_errors_distance():
-    pairs = pair_errors(PART, CELLS, SIMULATED, scale=1.0)
+    pairs = pair_errors(PART, CELLS, SIMULATED)
 
     np.testing.assert_allclose(pairs["distance_m"].iloc[0], 5.0)
     np.testing.assert_allclose(pairs["distance_m"].iloc[1], math.hypot(97.0, 4.0))
@@ -112,7 +109,7 @@ def test_pair_errors_no_path():
     simulated = SIMULATED.copy()
     simulated[0, 0] = np.nan
 
-    pairs = pair_errors(PART, CELLS, simulated, scale=1.0)
+    pairs = pair_errors(PART, CELLS, simulated)
 
     assert np.isnan(pairs["error_db"].iloc[0])
     assert np.isfinite(pairs["error_db"].iloc[1:]).all()
@@ -121,12 +118,12 @@ def test_pair_errors_no_path():
 @pytest.mark.parametrize("shape", [(1, 2), (2, 3)])
 def test_pair_errors_shape(shape):
     with pytest.raises(ValueError, match="shape"):
-        pair_errors(PART, CELLS, np.zeros(shape), scale=1.0)
+        pair_errors(PART, CELLS, np.zeros(shape))
 
 
 def test_pair_errors_unknown_cell():
     with pytest.raises(ValueError, match="not in"):
-        pair_errors(PART, CELLS[:1], SIMULATED[:, :1], scale=1.0)
+        pair_errors(PART, CELLS[:1], SIMULATED[:, :1])
 
 
 # --- error_statistics ---
@@ -165,14 +162,15 @@ def test_error_statistics_smape_matches_loss():
     measured = rng.uniform(-120.0, -60.0, size=50)
     simulated = rng.uniform(-120.0, -60.0, size=50)
     scale = 3.0
+    # src.simulation.compute_rsrp_dbm divides the simulated power by the scale.
+    scaled_dbm = simulated - 10.0 * np.log10(scale)
     pairs = pair_errors(
         long_part([(i, "a", 0.0, 0.0, 1.5, value) for i, value in enumerate(measured)]),
         CELLS[:1],
-        simulated[:, np.newaxis],
-        scale,
+        scaled_dbm[:, np.newaxis],
     )
 
-    expected = np.mean(smape(scale * dbm_to_mw(measured), dbm_to_mw(simulated)))
+    expected = np.mean(smape(dbm_to_mw(measured), dbm_to_mw(simulated) / scale))
     assert error_statistics(pairs, QUANTILES)["smape"] == pytest.approx(expected)
 
 
@@ -207,7 +205,7 @@ def test_error_statistics_bad_quantile(quantile):
 
 
 def test_grouped_statistics():
-    pairs = pair_errors(PART, CELLS, SIMULATED, scale=1.0)
+    pairs = pair_errors(PART, CELLS, SIMULATED)
 
     table = grouped_statistics(pairs, pairs["cell"], QUANTILES)
 

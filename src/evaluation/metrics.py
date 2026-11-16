@@ -1,6 +1,7 @@
 """Error statistics of a calibrated model against the measured RSRP.
 
-The functions use the RSRP that the caller simulates with `src.simulation.compute_rsrp`.
+The functions use the RSRP that the caller simulates with `src.simulation.compute_rsrp_dbm`,
+with the power scale of the model.
 They do no ray tracing.
 """
 
@@ -36,7 +37,7 @@ class BootstrapInterval(NamedTuple):
 
 
 def pair_errors(
-    part: pd.DataFrame, cells: Sequence[Cell], simulated_dbm: np.ndarray, scale: float
+    part: pd.DataFrame, cells: Sequence[Cell], simulated_dbm: np.ndarray
 ) -> pd.DataFrame:
     """Calculate the error of each received (record, cell) pair of a part.
 
@@ -46,11 +47,11 @@ def pair_errors(
         simulated_dbm: Simulated RSRP in dBm, with shape `[n, len(cells)]`. `n` is the
             number of records of `part`. The rows are in the order of `record`, as
             `src.data.mdt_to_arrays` gives the positions. NaN shows that no path connects
-            the cell and the record.
-        scale: The linear power scale of the model. It multiplies the measured power.
+            the cell and the record. The values must have the power scale of the model.
 
     Returns:
-        One row for each row of `part`, with the columns `PAIR_COLUMNS`. `error_db` is the
+        One row for each row of `part`, with the columns `PAIR_COLUMNS`.
+        `simulated_dbm` has the power scale of the model. `error_db` is the
         signed error of `src.calibration.log_error`. It is NaN if the pair has no
         simulated path. `distance_m` is the distance from the cell to the reported
         position, in meters.
@@ -85,7 +86,7 @@ def pair_errors(
             "z": position[:, 2],
             "rsrp_dbm": measured,
             "simulated_dbm": simulated,
-            "error_db": log_error(measured, simulated, scale),
+            "error_db": log_error(measured, simulated),
             "distance_m": np.linalg.norm(position - cell_position[column], axis=1),
         },
         columns=list(PAIR_COLUMNS),
@@ -108,7 +109,7 @@ def error_statistics(pairs: pd.DataFrame, quantiles: Sequence[float]) -> pd.Seri
 
     The statistics in dB use only the pairs with a simulated path. `smape` uses all pairs:
     the symmetric absolute percentage error of the calibration loss (arXiv:2311.18558,
-    Eq. 39). The ratio of the scaled measured power to the simulated power is
+    Eq. 39). The ratio of the measured power to the scaled simulated power is
     `10 ** (error_db / 10)`, thus `smape` needs no scale. A pair with no path has a
     `smape` of 1, as in the calibration.
 

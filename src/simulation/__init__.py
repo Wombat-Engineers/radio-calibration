@@ -11,9 +11,10 @@ from src.simulation.neural_material import (  # noqa: E402
     NeuralRadioMaterial,
     apply_neural_material,
     assign_material,
+    check_scale,
     make_material_network,
 )
-from src.simulation.paths import compute_rsrp, compute_rsrp_mw  # noqa: E402
+from src.simulation.paths import compute_rsrp_dbm, compute_rsrp_mw  # noqa: E402
 from src.simulation.scene import (  # noqa: E402
     HeightMap,
     building_height_map,
@@ -28,7 +29,8 @@ __all__ = [
     "apply_neural_material",
     "assign_material",
     "building_height_map",
-    "compute_rsrp",
+    "check_scale",
+    "compute_rsrp_dbm",
     "compute_rsrp_mw",
     "is_outdoor",
     "load_rt_scene",

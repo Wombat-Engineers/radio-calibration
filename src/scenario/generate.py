@@ -12,7 +12,7 @@ from src.core import read_cells, write_cells
 from src.scenario.mdt import sample_mdt
 from src.scenario.sites import place_sites
 from src.scenario.traffic import building_density
-from src.simulation import building_height_map, compute_rsrp, is_outdoor, load_rt_scene
+from src.simulation import building_height_map, compute_rsrp_dbm, is_outdoor, load_rt_scene
 from src.utils import CONFIG_DIR, DATA_DIR, seed_everything
 
 log = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ def generate(cfg: DictConfig, output_dir: Path) -> None:
     def timed_rsrp(positions: np.ndarray) -> np.ndarray:
         nonlocal rsrp_calls, rsrp_positions, rsrp_seconds
         call_started = time.perf_counter()
-        rsrp = compute_rsrp(scene, cells, positions, cfg.simulation)
+        rsrp = compute_rsrp_dbm(scene, cells, positions, cfg.simulation)
         rsrp_seconds += time.perf_counter() - call_started
         rsrp_calls += 1
         rsrp_positions += len(positions)

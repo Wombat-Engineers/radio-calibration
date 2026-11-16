@@ -7,7 +7,6 @@ import drjit as dr
 import mitsuba as mi
 import numpy as np
 import pandas as pd
-from drjit import nn
 from omegaconf import DictConfig
 
 from src.calibration.loss import (
@@ -18,21 +17,18 @@ from src.calibration.loss import (
     update_scale,
 )
 from src.core import Cell
-from src.simulation import compute_rsrp, compute_rsrp_mw
+from src.simulation import NeuralRadioMaterial, compute_rsrp_dbm, compute_rsrp_mw
 
 
 @dataclass(frozen=True)
 class CalibrationResult:
-    """Result of `calibrate`.
+    """Result of `calibrate`. The power scale is `NeuralRadioMaterial.scale`.
 
     Attributes:
-        scale: The linear power scale after the last step. It multiplies the measured
-            power.
         history: One row for each step, with the columns `step`, `loss`, `scale`, and
             `validation_loss`. `validation_loss` is NaN at a step with no validation.
     """
 
-    scale: float
     history: pd.DataFrame
 
 
@@ -48,15 +44,15 @@ def _mean_loss(
     if not np.isfinite(rsrp_dbm).any():
         return float("nan")
     measured, simulated = received_powers(
-        rsrp_dbm, compute_rsrp(scene, cells, positions, simulation)
+        rsrp_dbm, compute_rsrp_dbm(scene, cells, positions, simulation, scale)
     )
-    return float(np.mean(smape(scale * measured, simulated)))
+    return float(np.mean(smape(measured, simulated)))
 
 
 def calibrate(
     scene,
     cells: Sequence[Cell],
-    network: nn.Module,
+    material: NeuralRadioMaterial,
     positions: np.ndarray,
     rsrp_dbm: np.ndarray,
     validation: tuple[np.ndarray, np.ndarray],
@@ -68,13 +64,15 @@ def calibrate(
 
     The function does Algorithm 1 of arXiv:2311.18558 with the AdamW optimizer. The loss
     is the power term of Eq. 38 of the paper: the measurements have no delay spread. The
-    function changes the weights of `network`.
+    function changes the weights of `material.network` and sets `material.scale`. The
+    function starts with no scale, also if `material` has a scale. If the function stops
+    with an error, the weights and the scale are those of the last completed step.
 
     Args:
-        scene: The Sionna RT scene. All objects must have a material that uses `network`.
-            The scene must have no transmitter and no receiver.
+        scene: The Sionna RT scene. All objects must have `material`. The scene must have
+            no transmitter and no receiver.
         cells: The cells.
-        network: The network of the material, from `make_material_network`.
+        material: The neural material of the scene.
         positions: Positions of the train records in meters, with shape `[n, 3]`.
         rsrp_dbm: Measured RSRP of the train records in dBm, with shape
             `[n, len(cells)]`. NaN shows that the record does not have the cell.
@@ -87,7 +85,7 @@ def calibrate(
         seed: Seed of the random order of the train records.
 
     Returns:
-        The power scale and the history of the steps.
+        The history of the steps.
 
     Raises:
         ValueError: If there is no train record, or if all simulated powers of a batch
@@ -95,12 +93,13 @@ def calibrate(
     """
     if len(positions) == 0:
         raise ValueError("The calibration needs a minimum of one train record.")
+    network = material.network
     rng = np.random.default_rng(seed)
     optimizer = dr.opt.AdamW(lr=calibration.learning_rate, weight_decay=calibration.weight_decay)
     optimizer.update(network)
     measured_mw = dbm_to_mw(rsrp_dbm)
     batch_size = min(calibration.batch_size, len(positions))
-    scale = None
+    material.scale = None
     rows = []
     for step in range(calibration.num_steps):
         network.update(optimizer)
@@ -111,25 +110,33 @@ def calibrate(
         simulated = dr.gather(mi.Float, simulated.array, mi.UInt32(received))
         measured = np.ravel(measured_mw[batch])[received]
         # The scale gets no gradient: it has a closed-form solution (Eq. 43).
-        estimate = scale_estimate(measured, simulated.numpy())
-        scale = update_scale(scale, estimate, calibration.scale_decay)
+        scale = update_scale(
+            material.scale,
+            scale_estimate(measured, simulated.numpy()),
+            calibration.scale_decay,
+        )
+        # The only place where the scale multiplies the measured power: the scale comes from
+        # this path solver call, thus `compute_rsrp_mw` cannot get it as an argument. A
+        # second call with the scale costs one more ray tracing of the batch.
+        # smape(scale * P, P_hat) is equal to smape(P, P_hat / scale).
         loss = dr.mean(smape(mi.Float(scale * measured), simulated))
         dr.backward(loss)
         optimizer.step()
+        material.scale = scale
         loss_value = float(np.ravel(loss.numpy())[0])
         # Release the graph of this step before the validation: the GPU memory is small.
         del simulated, loss
         validation_loss = float("nan")
         if (step + 1) % calibration.validation_interval == 0:
             network.update(optimizer)
-            validation_loss = _mean_loss(scene, cells, *validation, scale, simulation)
+            validation_loss = _mean_loss(scene, cells, *validation, material.scale, simulation)
         rows.append(
             {
                 "step": step,
                 "loss": loss_value,
-                "scale": scale,
+                "scale": material.scale,
                 "validation_loss": validation_loss,
             }
         )
     network.update(optimizer)
-    return CalibrationResult(float(scale), pd.DataFrame(rows))
+    return CalibrationResult(pd.DataFrame(rows))

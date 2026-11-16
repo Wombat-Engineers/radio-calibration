@@ -9,7 +9,7 @@ from src.simulation import (
     NeuralRadioMaterial,
     apply_neural_material,
     building_height_map,
-    compute_rsrp,
+    compute_rsrp_dbm,
     compute_rsrp_mw,
     is_outdoor,
     load_rt_scene,
@@ -88,74 +88,74 @@ def test_is_outdoor_in_building(scene):
     assert is_outdoor(scene, np.array([IN_BUILDING, outside_scene])).tolist() == [False, False]
 
 
-def test_compute_rsrp_shape(scene):
+def test_compute_rsrp_dbm_shape(scene):
     positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
 
-    assert compute_rsrp(scene, CELLS, positions, SIMULATION).shape == (4, 2)
+    assert compute_rsrp_dbm(scene, CELLS, positions, SIMULATION).shape == (4, 2)
     assert len(scene.transmitters) == 0
     assert len(scene.receivers) == 0
 
 
-def test_compute_rsrp_los_finite(scene):
-    rsrp = compute_rsrp(scene, CELLS, np.array([STREET]), SIMULATION)
+def test_compute_rsrp_dbm_los_finite(scene):
+    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([STREET]), SIMULATION)
 
     assert np.isfinite(rsrp).all()
     # A path has a loss, and the gain of the 2 x 2 array with the pattern is below 30 dB.
     assert (rsrp < CELLS[0].power_rs_dbm + 30.0).all()
 
 
-def test_compute_rsrp_indoor_nan(scene):
-    rsrp = compute_rsrp(scene, CELLS, np.array([IN_BUILDING]), SIMULATION)
+def test_compute_rsrp_dbm_indoor_nan(scene):
+    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([IN_BUILDING]), SIMULATION)
 
     assert np.isnan(rsrp).all()
 
 
-def test_compute_rsrp_batches_equal(scene):
+def test_compute_rsrp_dbm_batches_equal(scene):
     positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
     one_by_one = OmegaConf.merge(SIMULATION, {"rx_batch_size": 1})
 
     np.testing.assert_allclose(
-        compute_rsrp(scene, CELLS, positions, one_by_one),
-        compute_rsrp(scene, CELLS, positions, SIMULATION),
+        compute_rsrp_dbm(scene, CELLS, positions, one_by_one),
+        compute_rsrp_dbm(scene, CELLS, positions, SIMULATION),
         atol=1.0,
     )
 
 
-def test_compute_rsrp_deterministic_repeats(scene):
+def test_compute_rsrp_dbm_deterministic_repeats(scene):
     positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
 
-    first = compute_rsrp(scene, CELLS, positions, SIMULATION)
-    second = compute_rsrp(scene, CELLS, positions, SIMULATION)
+    first = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION)
+    second = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION)
 
     np.testing.assert_array_equal(first, second)
 
 
-def test_compute_rsrp_mixed_arrays(scene):
+def test_compute_rsrp_dbm_mixed_arrays(scene):
     cells = [CELLS[0], make_cell("other", num_rows=4, num_cols=2)]
 
     with pytest.raises(ValueError, match="same array"):
-        compute_rsrp(scene, cells, np.array([STREET]), SIMULATION)
+        compute_rsrp_dbm(scene, cells, np.array([STREET]), SIMULATION)
     assert len(scene.transmitters) == 0
 
 
-def test_compute_rsrp_bad_positions(scene):
+def test_compute_rsrp_dbm_bad_positions(scene):
     with pytest.raises(ValueError, match="shape"):
-        compute_rsrp(scene, CELLS, np.zeros((4, 2)), SIMULATION)
+        compute_rsrp_dbm(scene, CELLS, np.zeros((4, 2)), SIMULATION)
 
 
-def test_compute_rsrp_refraction_reaches_indoor(scene):
+def test_compute_rsrp_dbm_refraction_reaches_indoor(scene):
     with_refraction = OmegaConf.merge(SIMULATION, {"solver": {"refraction": True}})
 
-    rsrp = compute_rsrp(scene, CELLS, np.array([IN_BUILDING]), with_refraction)
+    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([IN_BUILDING]), with_refraction)
 
     assert np.isfinite(rsrp).any()
 
 
-def test_compute_rsrp_unknown_solver_key(scene):
+def test_compute_rsrp_dbm_unknown_solver_key(scene):
     unknown = OmegaConf.merge(SIMULATION, {"solver": {"nope": 1}})
 
     with pytest.raises(TypeError):
-        compute_rsrp(scene, CELLS, np.array([STREET]), unknown)
+        compute_rsrp_dbm(scene, CELLS, np.array([STREET]), unknown)
     assert len(scene.transmitters) == 0
     assert len(scene.receivers) == 0
 
@@ -163,13 +163,13 @@ def test_compute_rsrp_unknown_solver_key(scene):
 # --- compute_rsrp_mw ---
 
 
-def test_compute_rsrp_mw_matches_compute_rsrp(scene):
+def test_compute_rsrp_mw_matches_compute_rsrp_dbm(scene):
     positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
 
     power_mw = compute_rsrp_mw(scene, CELLS, positions, SIMULATION).numpy()
 
     np.testing.assert_allclose(
-        10.0 * np.log10(power_mw), compute_rsrp(scene, CELLS, positions, SIMULATION), atol=1.0
+        10.0 * np.log10(power_mw), compute_rsrp_dbm(scene, CELLS, positions, SIMULATION), atol=1.0
     )
 
 
@@ -191,6 +191,42 @@ def test_compute_rsrp_mw_cleans_scene(scene):
 def test_compute_rsrp_mw_bad_positions(scene, positions):
     with pytest.raises(ValueError, match="positions"):
         compute_rsrp_mw(scene, CELLS, positions, SIMULATION)
+
+
+# --- power scale ---
+
+
+def test_compute_rsrp_dbm_scale(scene):
+    positions = np.array([STREET])
+    unscaled = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION)
+
+    scaled = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION, scale=0.5)
+
+    # A scale of 0.5 adds 10 log10(2) dB.
+    np.testing.assert_allclose(scaled, unscaled + 10.0 * np.log10(2.0), atol=1e-6)
+
+
+def test_compute_rsrp_dbm_scale_keeps_nan(scene):
+    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([IN_BUILDING]), SIMULATION, scale=2.0)
+
+    assert np.isnan(rsrp).all()
+
+
+def test_compute_rsrp_mw_scale(scene):
+    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
+    unscaled = compute_rsrp_mw(scene, CELLS, positions, SIMULATION).numpy()
+
+    scaled = compute_rsrp_mw(scene, CELLS, positions, SIMULATION, scale=4.0).numpy()
+
+    np.testing.assert_allclose(scaled, unscaled / 4.0, rtol=1e-6)
+
+
+@pytest.mark.parametrize("compute", [compute_rsrp_dbm, compute_rsrp_mw])
+@pytest.mark.parametrize("scale", [0.0, -1.0, np.nan, np.inf])
+def test_compute_rsrp_bad_scale(scene, compute, scale):
+    with pytest.raises(ValueError, match="scale"):
+        compute(scene, CELLS, np.array([STREET]), SIMULATION, scale=scale)
+    assert len(scene.transmitters) == 0
 
 
 # --- NeuralRadioMaterial ---
@@ -259,9 +295,9 @@ def test_apply_neural_material_survives_frequency(neural_scene):
     np.testing.assert_array_equal(material.values_at(POINTS).conductivity.numpy(), before)
 
 
-def test_compute_rsrp_with_neural_material(neural_scene):
+def test_compute_rsrp_dbm_with_neural_material(neural_scene):
     scene, _ = neural_scene
-    rsrp = compute_rsrp(scene, CELLS, np.array([STREET]), SIMULATION)
+    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([STREET]), SIMULATION)
 
     assert rsrp.shape == (1, 2)
     assert np.isfinite(rsrp).all()
@@ -277,16 +313,16 @@ def test_compute_rsrp_mw_repeats_exactly(neural_scene):
     np.testing.assert_array_equal(runs[0], runs[2])
 
 
-def test_compute_rsrp_no_synthetic_array(scene):
+def test_compute_rsrp_dbm_no_synthetic_array(scene):
     # Without a synthetic array, the delays have one value for each antenna pair.
     real_array = OmegaConf.merge(SIMULATION, {"solver": {"synthetic_array": False}})
 
-    rsrp = compute_rsrp(scene, CELLS, np.array([STREET]), real_array)
+    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([STREET]), real_array)
 
     assert rsrp.shape == (1, 2)
     assert np.isfinite(rsrp).all()
     np.testing.assert_allclose(
-        rsrp, compute_rsrp(scene, CELLS, np.array([STREET]), SIMULATION), atol=1.0
+        rsrp, compute_rsrp_dbm(scene, CELLS, np.array([STREET]), SIMULATION), atol=1.0
     )
 
 
@@ -330,3 +366,32 @@ def test_from_state_wrong_weight_count(neural_scene):
 
     with pytest.raises(ValueError, match="weights"):
         NeuralRadioMaterial.from_state(state, "copy")
+
+
+def test_neural_material_scale_default_none(neural_scene):
+    _, material = neural_scene
+
+    assert material.scale is None
+
+
+@pytest.mark.parametrize("scale", [0.0, -1.0, np.nan, np.inf])
+def test_neural_material_bad_scale(neural_scene, scale):
+    _, material = neural_scene
+
+    with pytest.raises(ValueError, match="scale"):
+        material.scale = scale
+
+
+def test_neural_material_state_scale(neural_scene):
+    _, material = neural_scene
+    material.scale = 2.5
+
+    assert NeuralRadioMaterial.from_state(material.state(), "copy").scale == 2.5
+
+
+def test_neural_material_state_no_scale(neural_scene):
+    _, material = neural_scene
+    state = material.state()
+
+    assert "scale" not in state
+    assert NeuralRadioMaterial.from_state(state, "copy").scale is None

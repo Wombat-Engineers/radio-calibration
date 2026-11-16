@@ -4,6 +4,7 @@ The method is "Neural Materials" of arXiv:2311.18558, Section III-D. A multilaye
 perceptron (MLP) gives the material properties at each point where a ray hits a surface.
 """
 
+import math
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import NamedTuple
@@ -18,6 +19,22 @@ from drjit import nn
 _WEIGHT_FLOAT = dr.float16_array_t(mi.Float)
 _WEIGHT_TENSOR = dr.tensor_t(_WEIGHT_FLOAT)
 _STATE_KEYS = ("weights", "encoding_octaves", "hidden_layers", "hidden_units", "center", "extent")
+_SCALE_KEY = "scale"
+
+
+def check_scale(scale: float | None) -> None:
+    """Make sure that a power scale is None or a finite number more than 0.
+
+    The power scale divides the simulated power (arXiv:2311.18558, Algorithm 1).
+
+    Args:
+        scale: The linear power scale, or None for no scale.
+
+    Raises:
+        ValueError: If `scale` is not None and is not a finite number more than 0.
+    """
+    if scale is not None and not (math.isfinite(scale) and scale > 0):
+        raise ValueError(f"The scale must be a finite number more than 0, but it is {scale}.")
 
 
 class MaterialValues(NamedTuple):
@@ -91,13 +108,36 @@ class NeuralRadioMaterial(sionna.rt.RadioMaterial):
         network: A network from `make_material_network`.
         center: Center of the bounding box of the scene, in meters.
         extent: Length of the longest side of the bounding box of the scene, in meters.
+        scale: The linear power scale of the calibration, or None if the material has no
+            calibration. The weights are correct only with their scale.
+
+    Raises:
+        ValueError: If `scale` is not None and is not a finite number more than 0.
     """
 
-    def __init__(self, name: str, network: nn.Module, center: mi.Point3f, extent: float):
+    def __init__(
+        self,
+        name: str,
+        network: nn.Module,
+        center: mi.Point3f,
+        extent: float,
+        scale: float | None = None,
+    ):
         super().__init__(name=name)
         self.network = network
         self._center = mi.Point3f(center)
         self._extent = float(extent)
+        self.scale = scale
+
+    @property
+    def scale(self) -> float | None:
+        """The linear power scale that divides the simulated power, or None for no scale."""
+        return self._scale
+
+    @scale.setter
+    def scale(self, value: float | None) -> None:
+        check_scale(value)
+        self._scale = None if value is None else float(value)
 
     def values_at(self, points: mi.Point3f | np.ndarray) -> MaterialValues:
         """Calculate the material properties at the given points.
@@ -162,10 +202,11 @@ class NeuralRadioMaterial(sionna.rt.RadioMaterial):
 
         Returns:
             The weights, the network structure (`encoding_octaves`, `hidden_layers`,
-            `hidden_units`), and the normalization (`center`, `extent`).
+            `hidden_units`), and the normalization (`center`, `extent`). The key `scale`
+            has the power scale. The key is not there if the scale is None.
         """
         encoding_octaves, hidden_layers, hidden_units = _architecture(self.network)
-        return {
+        state = {
             "weights": np.array(self.network["weights"], dtype=np.float16),
             "encoding_octaves": np.array(encoding_octaves),
             "hidden_layers": np.array(hidden_layers),
@@ -173,6 +214,9 @@ class NeuralRadioMaterial(sionna.rt.RadioMaterial):
             "center": np.ravel(self._center.numpy()),
             "extent": np.array(self._extent),
         }
+        if self._scale is not None:
+            state[_SCALE_KEY] = np.array(self._scale)
+        return state
 
     @classmethod
     def from_state(cls, state: Mapping[str, np.ndarray], name: str) -> "NeuralRadioMaterial":
@@ -186,8 +230,9 @@ class NeuralRadioMaterial(sionna.rt.RadioMaterial):
             The material.
 
         Raises:
-            ValueError: If a key is missing, or if the number of weights does not agree
-                with the network structure.
+            ValueError: If a key is missing, if the number of weights does not agree
+                with the network structure, or if the scale is not a finite number more
+                than 0.
         """
         missing = [key for key in _STATE_KEYS if key not in state]
         if missing:
@@ -206,7 +251,8 @@ class NeuralRadioMaterial(sionna.rt.RadioMaterial):
             )
         network["weights"] = _WEIGHT_FLOAT(weights.astype(np.float16))
         center = mi.Point3f([float(value) for value in np.ravel(state["center"])])
-        return cls(name, network, center, float(state["extent"]))
+        scale = float(state[_SCALE_KEY]) if _SCALE_KEY in state else None
+        return cls(name, network, center, float(state["extent"]), scale)
 
 
 def assign_material(scene: sionna.rt.Scene, material: NeuralRadioMaterial) -> None:

@@ -10,6 +10,7 @@ import sionna.rt
 from omegaconf import DictConfig
 
 from src.core import Cell
+from src.simulation.neural_material import check_scale
 
 _ARRAY_FIELDS = (
     "num_rows",
@@ -131,13 +132,14 @@ def _gain_tensor(
     return gain
 
 
-def compute_rsrp(
+def compute_rsrp_dbm(
     scene: sionna.rt.Scene,
     cells: Sequence[Cell],
     positions: np.ndarray,
     simulation: DictConfig,
+    scale: float | None = None,
 ) -> np.ndarray:
-    """Calculate the RSRP of each cell at each position.
+    """Calculate the RSRP of each cell at each position, in dBm.
 
     The function sets the frequency, the bandwidth, and the arrays of the scene. It adds
     transmitters and receivers and removes them before it returns.
@@ -151,17 +153,21 @@ def compute_rsrp(
             arguments of the receiver `PlanarArray`), `solver` (the arguments of a call
             of the Sionna RT `PathSolver`), `deterministic` (the argument of its
             constructor), and `rx_batch_size`.
+        scale: The linear power scale of the calibration. It divides the simulated
+            power (arXiv:2311.18558, Algorithm 1). None gives the RSRP with no scale.
 
     Returns:
         The RSRP in dBm, with shape `[n, len(cells)]`. A value is NaN if no path
         connects the cell and the position.
 
     Raises:
-        ValueError: If `positions` does not have the shape `[n, 3]`, or if the cells do
-            not have the same array configuration.
+        ValueError: If `positions` does not have the shape `[n, 3]`, if the cells do
+            not have the same array configuration, or if `scale` is not None and is not
+            a finite number more than 0.
         TypeError: If `solver` has a key that is not an argument of `PathSolver`.
     """
     _check_positions(positions)
+    check_scale(scale)
     _add_cells(scene, cells, simulation)
     batch = simulation.rx_batch_size
     try:
@@ -178,6 +184,8 @@ def compute_rsrp(
     finally:
         _remove_cells(scene, cells)
     gain = np.concatenate(gains) if gains else np.empty((0, len(cells)))
+    if scale is not None:
+        gain = gain / scale
     power_rs_dbm = np.array([cell.power_rs_dbm for cell in cells])
     with np.errstate(divide="ignore"):
         rsrp = power_rs_dbm + 10.0 * np.log10(gain)
@@ -189,32 +197,37 @@ def compute_rsrp_mw(
     cells: Sequence[Cell],
     positions: np.ndarray,
     simulation: DictConfig,
+    scale: float | None = None,
 ) -> mi.TensorXf:
-    """Calculate the RSRP of each cell at each position, with gradients.
+    """Calculate the RSRP of each cell at each position, in milliwatts, with gradients.
 
     Dr.Jit can calculate the gradient of the result for the parameters of the radio
     materials. The function uses one call of the path solver: the caller divides the
-    positions into batches. It changes the scene as `compute_rsrp` does.
+    positions into batches. It changes the scene as `compute_rsrp_dbm` does.
 
     Args:
         scene: The scene. It must have no transmitter and no receiver.
         cells: The cells. All cells must have the same array configuration.
         positions: Receiver positions in meters, with shape `[n, 3]` and `n` more than 0.
         simulation: The configuration from `configs/simulation.yaml`. The function
-            uses `radio`, `receiver`, `solver`, and `deterministic`, as `compute_rsrp` does.
+            uses `radio`, `receiver`, `solver`, and `deterministic`, as
+            `compute_rsrp_dbm` does.
+        scale: The linear power scale, as in `compute_rsrp_dbm`.
 
     Returns:
         The RSRP in milliwatts, with shape `[n, len(cells)]`. A value is 0 if no path
         connects the cell and the position.
 
     Raises:
-        ValueError: If `positions` does not have the shape `[n, 3]`, if it has no row, or
-            if the cells do not have the same array configuration.
+        ValueError: If `positions` does not have the shape `[n, 3]`, if it has no row, if
+            the cells do not have the same array configuration, or if `scale` is not None
+            and is not a finite number more than 0.
         TypeError: If `solver` has a key that is not an argument of `PathSolver`.
     """
     _check_positions(positions)
     if len(positions) == 0:
         raise ValueError("positions must have a minimum of one row.")
+    check_scale(scale)
     _add_cells(scene, cells, simulation)
     try:
         gain = _gain_tensor(
@@ -223,4 +236,5 @@ def compute_rsrp_mw(
     finally:
         _remove_cells(scene, cells)
     power_rs_mw = np.array([10.0 ** (cell.power_rs_dbm / 10.0) for cell in cells], dtype="f4")
-    return gain * mi.TensorXf(power_rs_mw[np.newaxis, :])
+    power = gain * mi.TensorXf(power_rs_mw[np.newaxis, :])
+    return power if scale is None else power / scale
