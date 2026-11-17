@@ -35,7 +35,7 @@ tasks:
 
       Examples:
         task lint
-        task lint -- src/utils
+        task lint -- lab/utils
     cmds:
       - uv run ruff check {{.CLI_ARGS | default "."}}
       - uv run ruff format --check {{.CLI_ARGS | default "."}}
@@ -68,11 +68,11 @@ tasks:
       - uv run pytest {{.CLI_ARGS}}
 
   scenario:
-    desc: Generate the cells and the MDT records in data/raw. Needs an NVIDIA GPU.
+    desc: Generate the cells and the MDT records in lab/data/raw. Needs an NVIDIA GPU.
     summary: |
-      Read configs/config.yaml, then write cells.csv and mdt.csv to data/raw. The task replaces
+      Read lab/configs/config.yaml, then write cells.csv and mdt.csv to lab/data/raw. The task replaces
       the files from the last run. Hydra writes the configuration and the log of the run to
-      outputs/scenario/<date>/<time>.
+      lab/outputs/scenario/<date>/<time>.
       Give Hydra overrides after "--" to change a value of the configuration.
 
       Examples:
@@ -81,59 +81,59 @@ tasks:
         task scenario -- seed=1 scenario.measurement.gnss_std_m=10
         task scenario -- simulation.solver.max_depth=5
     cmds:
-      - uv run python -m src.scenario {{.CLI_ARGS}}
+      - uv run python -m scenario {{.CLI_ARGS}}
 
   notebook:
     desc: Run a notebook from the first cell to the last cell. Needs an NVIDIA GPU.
     summary: |
-      Run all cells of a notebook and write a copy with the outputs to outputs/notebooks.
-      The task does not change the notebook in notebooks/. It stops at the first cell that fails.
-      Give the path of a notebook after "--". The default is notebooks/00_scenario.ipynb,
+      Run all cells of a notebook and write a copy with the outputs to lab/outputs/notebooks.
+      The task does not change the notebook in lab/notebooks/. It stops at the first cell that fails.
+      Give the path of a notebook after "--". The default is lab/notebooks/00_scenario.ipynb,
       which needs the files from "task scenario".
 
       Examples:
         task notebook
-        task notebook -- notebooks/01_eda.ipynb
+        task notebook -- lab/notebooks/01_eda.ipynb
     cmds:
-      - uv run jupyter nbconvert --execute --to notebook --output-dir outputs/notebooks {{.CLI_ARGS | default "notebooks/00_scenario.ipynb"}}
+      - uv run jupyter nbconvert --execute --to notebook --output-dir lab/outputs/notebooks {{.CLI_ARGS | default "lab/notebooks/00_scenario.ipynb"}}
 
   pipeline:
     desc: Run the scenario generator and all notebooks, then pack the results. Needs an NVIDIA GPU.
     summary: |
-      Run "python -m src.scenario", then each notebook of notebooks/ in the order of the names.
-      The task uses the configuration in configs/. Change the YAML files before the run to use
+      Run "python -m scenario", then each notebook of lab/notebooks/ in the order of the names.
+      The task uses the configuration in lab/configs/. Change the YAML files before the run to use
       other values. The task stops at the first step that fails. It always writes
-      outputs/archives/<start time>.zip with the data, the results, the configuration, and
+      lab/outputs/archives/<start time>.zip with the data, the results, the configuration, and
       manifest.json (status, steps, versions, GPU).
 
       Example:
         task pipeline
     cmds:
-      - uv run python scripts/run_pipeline.py
+      - uv run python lab/scripts/run_pipeline.py
 
   notebooks:
     desc: Run notebooks on the data that exists, then pack the results. Needs an NVIDIA GPU.
     summary: |
-      Run the given notebooks in this order, or all notebooks of notebooks/ if you give none.
+      Run the given notebooks in this order, or all notebooks of lab/notebooks/ if you give none.
       The task does not run the scenario generator. It stops at the first notebook that fails.
-      It always writes outputs/archives/<start time>.zip, as "task pipeline" does.
+      It always writes lab/outputs/archives/<start time>.zip, as "task pipeline" does.
 
       Examples:
         task notebooks
-        task notebooks -- notebooks/03_material_calibration.ipynb notebooks/04_evaluation.ipynb
+        task notebooks -- lab/notebooks/03_material_calibration.ipynb lab/notebooks/04_evaluation.ipynb
     cmds:
-      - uv run python scripts/run_notebooks.py {{.CLI_ARGS}}
+      - uv run python lab/scripts/run_notebooks.py {{.CLI_ARGS}}
 
   unpack:
-    desc: Extract an archive of "task pipeline" or "task notebooks" to outputs/remote.
+    desc: Extract an archive of "task pipeline" or "task notebooks" to lab/outputs/remote.
     summary: |
-      Extract a zip archive to outputs/remote/<archive name>/. The local results do not
+      Extract a zip archive to lab/outputs/remote/<archive name>/. The local results do not
       change. Copy the archive from the other machine first, for example with scp.
 
       Example:
-        task unpack -- outputs/archives/20261115-101500.zip
+        task unpack -- lab/outputs/archives/20261115-101500.zip
     cmds:
-      - uv run python -m zipfile -e {{.CLI_ARGS}} outputs/remote
+      - uv run python -m zipfile -e {{.CLI_ARGS}} lab/outputs/remote
 
   hooks:
     desc: Run all pre-commit hooks on all files.
@@ -160,12 +160,12 @@ tasks:
       - task: test
 
   lab:
-    desc: Start JupyterLab in the notebooks directory.
+    desc: Start JupyterLab in the lab/notebooks directory.
     summary: |
-      Start JupyterLab with the project environment. The browser opens the notebooks directory.
+      Start JupyterLab with the project environment. The browser opens the lab/notebooks directory.
       Stop the server with Ctrl+C.
 
       Example:
         task lab
     cmds:
-      - uv run jupyter lab --notebook-dir=notebooks
+      - uv run jupyter lab --notebook-dir=lab/notebooks

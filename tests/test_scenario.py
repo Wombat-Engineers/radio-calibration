@@ -1,4 +1,4 @@
-"""Tests for src.scenario."""
+"""Tests for scenario."""
 
 import logging
 
@@ -7,13 +7,14 @@ import pandas as pd
 import pytest
 from omegaconf import OmegaConf
 
-from src.core import read_cells
-from src.scenario.generate import generate
-from src.scenario.mdt import sample_mdt
-from src.scenario.sites import place_sites
-from src.scenario.traffic import building_density, slot_counts, spatial_weights
-from src.simulation import HeightMap
-from src.utils import load_config
+from preprocessing import read_cells
+from radio_calibration.simulation import load_rt_scene
+from scenario.generate import generate
+from scenario.height_map import HeightMap, building_height_map, is_outdoor
+from scenario.mdt import sample_mdt
+from scenario.sites import place_sites
+from scenario.traffic import building_density, slot_counts, spatial_weights
+from utils import load_config
 
 MIN_BUILDING_HEIGHT = 2.0
 FLAT = [1.0] * 24
@@ -42,6 +43,41 @@ def make_sites(height_map: HeightMap, isd_m: float = 300.0):
         height_map, MIN_BUILDING_HEIGHT, (0.0, 0.0), isd_m, 25.0, [0.0, 120.0, 240.0], 5.0, 4.85,
         TRANSMITTER,
     )  # fmt: skip
+
+
+# --- height_map (CUDA, small scene) ---
+
+# In `simple_street_canyon`, the street is along the x axis and buildings are on each side.
+STREET = [0.0, 0.0, 1.5]
+IN_BUILDING = [-40.0, 30.0, 1.5]
+
+
+@pytest.fixture(scope="module")
+def scene():
+    return load_rt_scene("simple_street_canyon")
+
+
+def test_height_map_street_canyon(scene):
+    height_map = building_height_map(scene, tile_size=5.0)
+
+    assert height_map.heights.ndim == 2
+    assert (height_map.heights > 10.0).any()
+    assert (height_map.heights < 0.5).any()
+    assert (height_map.heights >= 0.0).all()
+
+
+def test_height_map_bad_tile_size(scene):
+    with pytest.raises(ValueError):
+        building_height_map(scene, tile_size=0.0)
+
+
+def test_is_outdoor_street(scene):
+    assert is_outdoor(scene, np.array([STREET])).tolist() == [True]
+
+
+def test_is_outdoor_in_building(scene):
+    outside_scene = [1000.0, 1000.0, 1.5]
+    assert is_outdoor(scene, np.array([IN_BUILDING, outside_scene])).tolist() == [False, False]
 
 
 # --- sites ---
@@ -315,7 +351,7 @@ def test_mdt_gnss_error_moves_xy_only():
 
 
 def compose_scenario(*overrides: str):
-    """Compose configs/config.yaml, as `task scenario` does."""
+    """Compose lab/configs/config.yaml, as `task scenario` does."""
     return load_config(*overrides)
 
 
@@ -358,7 +394,7 @@ def test_generate_writes_outputs(tmp_path):
 
 
 def test_generate_logs_rsrp_time(tmp_path, caplog):
-    with caplog.at_level(logging.INFO, logger="src.scenario.generate"):
+    with caplog.at_level(logging.INFO, logger="scenario.generate"):
         generate(compose_scenario(*SMALL_RUN), tmp_path)
 
     records = len(pd.read_csv(tmp_path / "mdt.csv"))

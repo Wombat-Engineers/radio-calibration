@@ -11,7 +11,7 @@ from omegaconf import DictConfig
 from scipy.interpolate import RegularGridInterpolator
 from sklearn.linear_model import LinearRegression
 
-from src.utils import CONFIG_DIR, get_device
+from utils import CONFIG_DIR, get_device
 
 # Sionna RT needs a mono, polarized Mitsuba variant. The tests use CUDA only:
 # a CUDA failure must fail the test, not fall back to the LLVM (CPU) variant.

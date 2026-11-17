@@ -1,0 +1,109 @@
+"""Command that generates the cells and the MDT records."""
+
+import logging
+import time
+from pathlib import Path
+
+import hydra
+import numpy as np
+from omegaconf import DictConfig
+
+from preprocessing import read_cells, write_cells
+from radio_calibration.simulation import compute_rsrp_dbm, load_rt_scene
+from scenario.height_map import building_height_map, is_outdoor
+from scenario.mdt import sample_mdt
+from scenario.sites import place_sites
+from scenario.traffic import building_density
+from utils import CONFIG_DIR, DATA_DIR, scene_source, seed_everything, simulation_settings
+
+log = logging.getLogger(__name__)
+
+
+def generate(cfg: DictConfig, output_dir: Path) -> None:
+    """Generate the scenario data and write it to a directory.
+
+    The function writes `cells.csv` and `mdt.csv`. It replaces files that exist. It logs
+    the time of the RSRP calculation and the total time.
+
+    Args:
+        cfg: The configuration from `lab/configs/config.yaml`. The function uses `seed`,
+            `scenario`, and `simulation`.
+        output_dir: Directory for the files. The function creates it if necessary.
+
+    Raises:
+        ValueError: If the configuration has a value that is not permitted.
+        RuntimeError: If some MDT records have no valid position.
+    """
+    started = time.perf_counter()
+    scenario = cfg.scenario
+    seed_everything(cfg.seed)
+    rng = np.random.default_rng(cfg.seed)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    simulation = simulation_settings(cfg)
+    scene = load_rt_scene(scene_source(cfg))
+    height_map = building_height_map(scene, scenario.grid.tile_size_m)
+    ny, nx = height_map.heights.shape
+    center_xy = (
+        height_map.x_min + nx * height_map.tile_size / 2 + scenario.sites.center_offset_m[0],
+        height_map.y_min + ny * height_map.tile_size / 2 + scenario.sites.center_offset_m[1],
+    )
+    cells = place_sites(
+        height_map,
+        scenario.grid.min_building_height_m,
+        center_xy,
+        scenario.sites.isd_m,
+        scenario.sites.mast_height_m,
+        scenario.sites.sector_azimuths_deg,
+        scenario.sites.downtilt_deg,
+        scenario.antenna.power_rs,
+        scenario.antenna.transmitter,
+    )
+    # Read the file again: the RSRP then comes from the same data as with a real network file.
+    cells_path = output_dir / "cells.csv"
+    write_cells(cells, cells_path)
+    cells = read_cells(cells_path)
+
+    rsrp_calls = 0
+    rsrp_positions = 0
+    rsrp_seconds = 0.0
+
+    def timed_rsrp(positions: np.ndarray) -> np.ndarray:
+        nonlocal rsrp_calls, rsrp_positions, rsrp_seconds
+        call_started = time.perf_counter()
+        rsrp = compute_rsrp_dbm(scene, cells, positions, simulation)
+        rsrp_seconds += time.perf_counter() - call_started
+        rsrp_calls += 1
+        rsrp_positions += len(positions)
+        return rsrp
+
+    mdt = sample_mdt(
+        rng,
+        rsrp_fn=timed_rsrp,
+        outdoor_fn=lambda positions: is_outdoor(scene, positions),
+        cells=cells,
+        height_map=height_map,
+        min_building_height_m=scenario.grid.min_building_height_m,
+        density=building_density(
+            height_map, scenario.grid.min_building_height_m, scenario.traffic.density_radius_m
+        ),
+        traffic=scenario.traffic,
+        ue_height=scenario.ue_height,
+        measurement=scenario.measurement,
+    )
+    mdt.to_csv(output_dir / "mdt.csv", index=False)
+
+    log.info(
+        "RSRP: %d positions in %d calls, %.1f s, %.0f ms for each position",
+        rsrp_positions,
+        rsrp_calls,
+        rsrp_seconds,
+        1000 * rsrp_seconds / max(rsrp_positions, 1),
+    )
+    log.info("Total: %d MDT records in %.1f s", len(mdt), time.perf_counter() - started)
+
+
+@hydra.main(config_path=str(CONFIG_DIR), config_name="config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    """Generate the scenario data in `lab/data/raw`."""
+    generate(cfg, DATA_DIR / "raw")

@@ -1,0 +1,33 @@
+# Root configuration. `task scenario` and `utils.load_config` compose this file.
+# Each file below goes into its own key: cfg.scenario, cfg.simulation, cfg.calibration,
+# cfg.evaluation.
+
+defaults:
+  - scenario@scenario
+  - simulation@simulation
+  - calibration@calibration
+  - evaluation@evaluation
+  - _self_
+
+# Seed of all random generators: scenario, path solver, data split, and calibration.
+seed: 42
+
+# Output files of the notebooks: figures (PNG) and tables (CSV).
+# A relative path starts at the repository root.
+output:
+  figures:
+    dir: lab/reports/figures
+  tables:
+    dir: lab/reports/tables
+
+# Run directory of `task scenario`. Hydra writes the configuration of the run (.hydra/) and
+# the log there. A relative path starts at the working directory: the repository root.
+# The data goes to lab/data/raw/ through DATA_DIR, thus the working directory does not change.
+hydra:
+  run:
+    dir: lab/outputs/scenario/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: lab/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false

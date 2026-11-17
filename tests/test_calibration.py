@@ -1,11 +1,15 @@
-"""Tests for src.calibration. The `calibrate` and file tests use a small scene and CUDA."""
+"""Tests for radio_calibration.calibration.
+
+The `calibrate` and file tests use a small scene and CUDA.
+"""
+
+from dataclasses import replace
 
 import mitsuba as mi
 import numpy as np
 import pytest
-from omegaconf import OmegaConf
 
-from src.calibration import (
+from radio_calibration.calibration import (
     absolute_log_error,
     calibrate,
     dbm_to_mw,
@@ -17,7 +21,8 @@ from src.calibration import (
     smape,
     update_scale,
 )
-from src.simulation import (
+from radio_calibration.core import CalibrationSettings
+from radio_calibration.simulation import (
     apply_neural_material,
     compute_rsrp_mw,
     load_rt_scene,
@@ -25,15 +30,14 @@ from src.simulation import (
 )
 from tests.test_simulation import CELLS, NETWORK, POINTS, SIMULATION, weights_of
 
-CALIBRATION = OmegaConf.create(
-    {
-        "learning_rate": 1e-2,
-        "weight_decay": 0.0,
-        "num_steps": 2,
-        "batch_size": 2,
-        "validation_interval": 1,
-        "scale_decay": 0.5,
-    }
+CALIBRATION = CalibrationSettings(
+    **NETWORK,
+    learning_rate=1e-2,
+    weight_decay=0.0,
+    num_steps=2,
+    batch_size=2,
+    validation_interval=1,
+    scale_decay=0.5,
 )
 POSITIONS = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
 # One record does not have the second cell.
@@ -173,7 +177,7 @@ def neural_scene():
 
 def run_calibrate(neural_scene, rsrp_dbm=RSRP_DBM, **changes):
     scene, material = neural_scene
-    calibration = OmegaConf.merge(CALIBRATION, changes)
+    calibration = replace(CALIBRATION, **changes)
     return calibrate(
         scene,
         CELLS,

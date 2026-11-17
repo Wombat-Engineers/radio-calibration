@@ -56,7 +56,7 @@ GEMINI.md
 .mcp.json
 
 # --- Machine learning artifacts ---
-/data/
+/lab/data/
 outputs/
 reports/
 multirun/

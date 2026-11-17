@@ -1,4 +1,4 @@
-"""Tests for src.utils."""
+"""Tests for utils."""
 
 import json
 import sys
@@ -13,21 +13,27 @@ import torch
 from hydra.errors import ConfigCompositionException
 from omegaconf import OmegaConf
 
-import src.utils.output as output_module
-from src.utils import (
+import utils.output as output_module
+import utils.paths as paths_module
+from utils import (
     COLORS,
     CONFIG_DIR,
+    DATA_DIR,
+    OUTPUTS_DIR,
     PROJECT_ROOT,
+    calibration_settings,
     configure_matplotlib,
     configure_output,
     get_device,
     load_config,
     save_figure,
     save_table,
+    scene_source,
     seed_everything,
     setup_notebook,
+    simulation_settings,
 )
-from src.utils.runs import (
+from utils.runs import (
     NOTEBOOK_OUTPUT_DIR,
     environment_info,
     notebook_command,
@@ -139,8 +145,8 @@ def test_save_table_not_configured(no_output):
 def test_load_config_output():
     output = load_config().output
 
-    assert output.figures.dir == "reports/figures"
-    assert output.tables.dir == "reports/tables"
+    assert output.figures.dir == "lab/reports/figures"
+    assert output.tables.dir == "lab/reports/tables"
 
 
 def test_setup_notebook_outside_ipython():
@@ -149,8 +155,50 @@ def test_setup_notebook_outside_ipython():
 
 
 def test_config_dir_points_to_configs():
-    assert CONFIG_DIR == PROJECT_ROOT / "configs"
+    assert CONFIG_DIR == PROJECT_ROOT / "lab" / "configs"
     assert (CONFIG_DIR / "config.yaml").is_file()
+
+
+def test_data_and_outputs_in_lab():
+    assert DATA_DIR == PROJECT_ROOT / "lab" / "data"
+    assert OUTPUTS_DIR == PROJECT_ROOT / "lab" / "outputs"
+
+
+def test_simulation_settings_resolves_seed():
+    cfg = load_config()
+    settings = simulation_settings(cfg)
+
+    assert type(settings.solver) is dict
+    assert settings.solver["seed"] == cfg.seed
+    assert settings.frequency_hz == cfg.simulation.radio.frequency_hz
+    assert settings.rx_batch_size == cfg.simulation.rx_batch_size
+
+
+def test_calibration_settings_from_config():
+    cfg = load_config()
+    settings = calibration_settings(cfg)
+
+    assert settings.hidden_units == cfg.calibration.network.hidden_units
+    assert settings.num_steps == cfg.calibration.num_steps
+    assert settings.scale_decay == cfg.calibration.scale_decay
+
+
+def test_scene_source_builtin(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths_module, "SCENES_DIR", tmp_path)
+
+    assert scene_source(load_config("simulation.scene.name=munich")) == "munich"
+
+
+def test_scene_source_local_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths_module, "SCENES_DIR", tmp_path)
+    (tmp_path / "site.xml").write_text("<scene/>")
+
+    assert scene_source(load_config("simulation.scene.name=site")) == tmp_path / "site.xml"
+
+
+def test_scene_source_bad_name():
+    with pytest.raises(ValueError, match="letters"):
+        scene_source(load_config("simulation.scene.name=../munich"))
 
 
 def test_load_config_branches():
@@ -194,13 +242,20 @@ def test_select_notebooks_default():
 
 
 def test_select_notebooks_given():
-    assert select_notebooks(["notebooks/04_evaluation.ipynb"]) == [
-        (PROJECT_ROOT / "notebooks" / "04_evaluation.ipynb").resolve()
+    assert select_notebooks(["lab/notebooks/04_evaluation.ipynb"]) == [
+        (PROJECT_ROOT / "lab" / "notebooks" / "04_evaluation.ipynb").resolve()
     ]
 
 
 @pytest.mark.parametrize(
-    "name", ["README.md", "notebooks/../README.md", "../x.ipynb", "notebooks/nosuch.ipynb"]
+    "name",
+    [
+        "README.md",
+        "lab/notebooks/../README.md",
+        "../x.ipynb",
+        "lab/notebooks/nosuch.ipynb",
+        "notebooks/04_evaluation.ipynb",
+    ],
 )
 def test_select_notebooks_outside(name):
     with pytest.raises(ValueError, match="not a notebook"):
@@ -208,7 +263,7 @@ def test_select_notebooks_outside(name):
 
 
 def test_notebook_command_output_dir():
-    command = notebook_command(PROJECT_ROOT / "notebooks" / "04_evaluation.ipynb")
+    command = notebook_command(PROJECT_ROOT / "lab" / "notebooks" / "04_evaluation.ipynb")
 
     assert command[:4] == [sys.executable, "-m", "jupyter", "nbconvert"]
     assert command[command.index("--output-dir") + 1] == str(NOTEBOOK_OUTPUT_DIR)

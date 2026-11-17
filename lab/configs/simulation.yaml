@@ -1,0 +1,49 @@
+# Configuration of Sionna RT: the scene, the radio parameters, the UE antenna, and the solver.
+# lab/configs/config.yaml loads this file into its key `simulation`.
+
+scene:
+  # A scene that Sionna RT supplies, or a file <name>.xml in lab/data/external/scenes.
+  name: munich
+
+radio:
+  frequency_hz: 2.6e9
+  # Sets scene.bandwidth to one resource element. It does not change the RSRP.
+  subcarrier_spacing_hz: 30.0e3
+
+# UE antenna: one vertical dipole. Sionna RT planar array; spacings in wavelengths.
+receiver:
+  num_rows: 1
+  num_cols: 1
+  vertical_spacing: 0.5
+  horizontal_spacing: 0.5
+  pattern: "dipole"
+  polarization: "V"
+
+# Arguments of the Sionna RT PathSolver.
+# The values in use are small: they let the calibration run on a GPU with 4 GB of memory.
+# A comment "Recommended" gives the value for a GPU with more memory.
+solver:
+  max_depth: 5                    # Recommended: 8
+  samples_per_src: 100000         # Recommended: 1000000
+  # Sionna RT allocates the path buffer for this number of paths before it traces the rays.
+  max_num_paths_per_src: 50000    # Recommended: 1000000 (the default)
+  synthetic_array: true           # default
+  los: true                       # default
+  specular_reflection: true       # default
+  # The calibration learns the scattering coefficient. It needs the diffuse reflections.
+  diffuse_reflection: true
+  refraction: true
+  diffraction: true
+  edge_diffraction: false         # default
+  diffraction_lit_region: true    # default
+  # The root seed of lab/configs/config.yaml.
+  seed: ${seed}
+
+# Argument of the PathSolver constructor (Sionna RT).
+# false avoids the invalid NaN path that the deterministic solver of Sionna RT 2.2.0 can add
+# with specular and diffuse reflections on, and that stops the calibration, but the RSRP is
+# then not bit-equal between runs.
+deterministic: false
+
+# Number of UE positions in one PathSolver call. Assumption.
+rx_batch_size: 10                 # Recommended: 100

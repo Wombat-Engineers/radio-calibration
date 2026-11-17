@@ -1,17 +1,20 @@
-"""Tests for src.simulation. They use a small scene and CUDA."""
+"""Tests for radio_calibration.simulation. They use a small scene and CUDA."""
+
+import subprocess
+import sys
+from dataclasses import replace
+from pathlib import Path
 
 import drjit as dr
 import numpy as np
 import pytest
-from omegaconf import OmegaConf
 
-from src.simulation import (
+from radio_calibration.core import SimulationSettings
+from radio_calibration.simulation import (
     NeuralRadioMaterial,
     apply_neural_material,
-    building_height_map,
     compute_rsrp_dbm,
     compute_rsrp_mw,
-    is_outdoor,
     load_rt_scene,
     make_material_network,
 )
@@ -22,26 +25,25 @@ STREET = [0.0, 0.0, 1.5]
 IN_BUILDING = [-40.0, 30.0, 1.5]
 
 # The sample count is small because the GPU of the development machine has 4 GB of memory.
-SIMULATION = OmegaConf.create(
-    {
-        "radio": {"frequency_hz": 2.6e9, "subcarrier_spacing_hz": 30e3},
-        "receiver": {
-            "num_rows": 1,
-            "num_cols": 1,
-            "vertical_spacing": 0.5,
-            "horizontal_spacing": 0.5,
-            "pattern": "dipole",
-            "polarization": "V",
-        },
-        "solver": {
-            "samples_per_src": 10_000,
-            "max_depth": 2,
-            "diffraction": False,
-            "refraction": False,
-        },
-        "deterministic": True,
-        "rx_batch_size": 4,
-    }
+SIMULATION = SimulationSettings(
+    frequency_hz=2.6e9,
+    subcarrier_spacing_hz=30e3,
+    receiver={
+        "num_rows": 1,
+        "num_cols": 1,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "dipole",
+        "polarization": "V",
+    },
+    solver={
+        "samples_per_src": 10_000,
+        "max_depth": 2,
+        "diffraction": False,
+        "refraction": False,
+    },
+    deterministic=True,
+    rx_batch_size=4,
 )
 # Two cells above the street. They point along the street, one in each direction.
 CELLS = [
@@ -65,27 +67,54 @@ def test_load_rt_scene_unknown(name):
         load_rt_scene(name)
 
 
-def test_height_map_street_canyon(scene):
-    height_map = building_height_map(scene, tile_size=5.0)
+def test_load_rt_scene_path():
+    import sionna.rt
 
-    assert height_map.heights.ndim == 2
-    assert (height_map.heights > 10.0).any()
-    assert (height_map.heights < 0.5).any()
-    assert (height_map.heights >= 0.0).all()
+    scene = load_rt_scene(Path(sionna.rt.scene.simple_street_canyon))
 
-
-def test_height_map_bad_tile_size(scene):
-    with pytest.raises(ValueError):
-        building_height_map(scene, tile_size=0.0)
+    assert len(scene.objects) > 0
 
 
-def test_is_outdoor_street(scene):
-    assert is_outdoor(scene, np.array([STREET])).tolist() == [True]
+def test_load_rt_scene_missing_file(tmp_path):
+    with pytest.raises(ValueError, match="xml"):
+        load_rt_scene(tmp_path / "no.xml")
 
 
-def test_is_outdoor_in_building(scene):
-    outside_scene = [1000.0, 1000.0, 1.5]
-    assert is_outdoor(scene, np.array([IN_BUILDING, outside_scene])).tolist() == [False, False]
+def test_load_rt_scene_bad_suffix(tmp_path):
+    path = tmp_path / "scene.txt"
+    path.write_text("<scene/>")
+
+    with pytest.raises(ValueError, match="xml"):
+        load_rt_scene(path)
+
+
+# --- package boundary ---
+
+LAB_MODULES = ("scenario", "utils", "preprocessing", "analysis")
+
+
+def test_package_does_not_import_lab():
+    # A new process: this test process imported other modules already. The list has no
+    # matplotlib: sionna.rt imports it.
+    names = [*LAB_MODULES, "hydra", "torch"]
+    code = (
+        "import sys, radio_calibration.simulation, radio_calibration.calibration, "
+        "radio_calibration.evaluation; "
+        f"print([name for name in {names!r} if name in sys.modules])"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "[]"
+
+
+def test_package_has_only_deployment_modules():
+    import radio_calibration
+
+    root = Path(radio_calibration.__file__).parent
+    subpackages = {path.parent.name for path in root.glob("*/__init__.py")}
+
+    assert subpackages == {"core", "simulation", "calibration", "evaluation"}
 
 
 def test_compute_rsrp_dbm_shape(scene):
@@ -112,7 +141,7 @@ def test_compute_rsrp_dbm_indoor_nan(scene):
 
 def test_compute_rsrp_dbm_batches_equal(scene):
     positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
-    one_by_one = OmegaConf.merge(SIMULATION, {"rx_batch_size": 1})
+    one_by_one = replace(SIMULATION, rx_batch_size=1)
 
     np.testing.assert_allclose(
         compute_rsrp_dbm(scene, CELLS, positions, one_by_one),
@@ -144,7 +173,7 @@ def test_compute_rsrp_dbm_bad_positions(scene):
 
 
 def test_compute_rsrp_dbm_refraction_reaches_indoor(scene):
-    with_refraction = OmegaConf.merge(SIMULATION, {"solver": {"refraction": True}})
+    with_refraction = replace(SIMULATION, solver=SIMULATION.solver | {"refraction": True})
 
     rsrp = compute_rsrp_dbm(scene, CELLS, np.array([IN_BUILDING]), with_refraction)
 
@@ -152,7 +181,7 @@ def test_compute_rsrp_dbm_refraction_reaches_indoor(scene):
 
 
 def test_compute_rsrp_dbm_unknown_solver_key(scene):
-    unknown = OmegaConf.merge(SIMULATION, {"solver": {"nope": 1}})
+    unknown = replace(SIMULATION, solver=SIMULATION.solver | {"nope": 1})
 
     with pytest.raises(TypeError):
         compute_rsrp_dbm(scene, CELLS, np.array([STREET]), unknown)
@@ -290,7 +319,7 @@ def test_apply_neural_material_survives_frequency(neural_scene):
     scene, material = neural_scene
     before = material.values_at(POINTS).conductivity.numpy()
 
-    scene.frequency = SIMULATION.radio.frequency_hz
+    scene.frequency = SIMULATION.frequency_hz
 
     np.testing.assert_array_equal(material.values_at(POINTS).conductivity.numpy(), before)
 
@@ -315,7 +344,7 @@ def test_compute_rsrp_mw_repeats_exactly(neural_scene):
 
 def test_compute_rsrp_dbm_no_synthetic_array(scene):
     # Without a synthetic array, the delays have one value for each antenna pair.
-    real_array = OmegaConf.merge(SIMULATION, {"solver": {"synthetic_array": False}})
+    real_array = replace(SIMULATION, solver=SIMULATION.solver | {"synthetic_array": False})
 
     rsrp = compute_rsrp_dbm(scene, CELLS, np.array([STREET]), real_array)
 
