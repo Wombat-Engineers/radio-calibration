@@ -138,7 +138,7 @@ flowchart LR
 | NumPy, pandas, SciPy | Arrays, the history table, and the nearest-record distance | `radio-calibration` | Critical |
 | [psutil](https://github.com/giampaolo/psutil) | Memory and CPU use of the process for `ResourceMonitor` | `radio-calibration` | Low |
 | [nvidia-ml-py](https://pypi.org/project/nvidia-ml-py/) | NVML bindings of NVIDIA: GPU memory and GPU use for `ResourceMonitor` | `radio-calibration` | Low |
-| [PyTorch](https://pytorch.org/) 2.15.0+cu134 | Random seeds and device selection of the notebooks. The calibration does not use it. | `lab` | Low |
+| [PyTorch](https://pytorch.org/) 2.15.0+cu134 | Random seeds and device selection of the notebooks | `radio-calibration` | Low |
 | [Hydra](https://hydra.cc/) | Experiment configuration | `lab` | Critical for `lab` |
 
 [`uv.lock`](uv.lock) records the exact version of each package.
@@ -164,7 +164,7 @@ uv run pre-commit install
 ```
 
 `uv sync` installs the two packages of the workspace, `radio-calibration` and `lab`, in
-editable mode. It installs PyTorch for `lab` from the PyTorch package index for CUDA 13.4.
+editable mode. It installs PyTorch from the PyTorch package index for CUDA 13.4.
 On Windows, PyPI has only the CPU build of PyTorch.
 
 ### Run

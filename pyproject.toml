@@ -5,8 +5,8 @@ description = "Calibration of Sionna RT radio maps against measurements with PyT
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13"
-# Only the packages that radio_calibration imports. lab/pyproject.toml has the packages of
-# the experiments.
+# The packages of radio_calibration. lab uses them also. lab/pyproject.toml has the packages
+# of the experiments only.
 dependencies = [
     "drjit>=1.5.0",
     "mitsuba>=3.9.1",
@@ -16,6 +16,7 @@ dependencies = [
     "psutil>=7.2.2",
     "scipy>=1.18.1",
     "sionna-rt>=2.2.0",
+    "torch>=2.15.0",
 ]
 
 [build-system]
