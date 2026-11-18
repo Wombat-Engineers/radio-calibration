@@ -1,5 +1,6 @@
 """Gradient-based calibration of a neural material (arXiv:2311.18558, Algorithm 1)."""
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -24,8 +25,10 @@ class CalibrationResult:
     """Result of `calibrate`. The power scale is `NeuralRadioMaterial.scale`.
 
     Attributes:
-        history: One row for each step, with the columns `step`, `loss`, `scale`, and
-            `validation_loss`. `validation_loss` is NaN at a step with no validation.
+        history: One row for each step, with the columns `step`, `epoch`, `loss`, `scale`,
+            `validation_loss`, and `step_seconds`. `validation_loss` is NaN at a step with no
+            validation. `step_seconds` is the run time of the gradient step in seconds, with
+            no validation.
     """
 
     history: pd.DataFrame
@@ -67,6 +70,11 @@ def calibrate(
     function starts with no scale, also if `material` has a scale. If the function stops
     with an error, the weights and the scale are those of the last completed step.
 
+    Each epoch puts the train records in a new random order and divides them into batches
+    of `calibration.batch_size` records. Thus each record is in one batch of each epoch. The
+    last batch of an epoch can have fewer records. The validation loss is calculated after
+    the last step of each `calibration.validation_interval` epochs.
+
     Args:
         scene: The Sionna RT scene. All objects must have `material`. The scene must have
             no transmitter and no receiver.
@@ -96,12 +104,16 @@ def calibrate(
     optimizer = dr.opt.AdamW(lr=calibration.learning_rate, weight_decay=calibration.weight_decay)
     optimizer.update(network)
     measured_mw = dbm_to_mw(rsrp_dbm)
-    batch_size = min(calibration.batch_size, len(positions))
     material.scale = None
     rows = []
-    for step in range(calibration.num_steps):
+    steps = []
+    for epoch in range(calibration.num_epochs):
+        order = rng.permutation(len(positions))
+        for first in range(0, len(positions), calibration.batch_size):
+            steps.append((epoch, order[first : first + calibration.batch_size]))
+    for step, (epoch, batch) in enumerate(steps):
+        start = time.perf_counter()
         network.update(optimizer)
-        batch = rng.choice(len(positions), size=batch_size, replace=False)
         simulated = compute_rsrp_mw(scene, cells, positions[batch], simulation)
         # Only the received (record, cell) pairs have a measurement.
         received = np.flatnonzero(np.isfinite(measured_mw[batch]))
@@ -122,18 +134,25 @@ def calibrate(
         optimizer.step()
         material.scale = scale
         loss_value = float(np.ravel(loss.numpy())[0])
+        # The kernel of the optimizer step runs on the GPU with no wait. Wait for it, so the
+        # time of this step includes it.
+        dr.sync_thread()
+        step_seconds = time.perf_counter() - start
         # Release the graph of this step before the validation: the GPU memory is small.
         del simulated, loss
         validation_loss = float("nan")
-        if (step + 1) % calibration.validation_interval == 0:
+        last_of_epoch = step + 1 == len(steps) or steps[step + 1][0] != epoch
+        if last_of_epoch and (epoch + 1) % calibration.validation_interval == 0:
             network.update(optimizer)
             validation_loss = _mean_loss(scene, cells, *validation, material.scale, simulation)
         rows.append(
             {
                 "step": step,
+                "epoch": epoch,
                 "loss": loss_value,
                 "scale": material.scale,
                 "validation_loss": validation_loss,
+                "step_seconds": step_seconds,
             }
         )
     network.update(optimizer)

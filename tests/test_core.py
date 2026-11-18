@@ -50,7 +50,7 @@ CALIBRATION_MAPPING = {
     "network": {"encoding_octaves": 2, "hidden_layers": 1, "hidden_units": 32},
     "learning_rate": 1e-2,
     "weight_decay": 0.0,
-    "num_steps": 2,
+    "num_epochs": 2,
     "batch_size": 2,
     "validation_interval": 1,
     "scale_decay": 0.5,
@@ -101,18 +101,18 @@ def test_calibration_settings_from_mapping():
 
     assert settings.hidden_units == 32
     assert settings.encoding_octaves == 2
-    assert settings.num_steps == 2
+    assert settings.num_epochs == 2
     assert settings.scale_decay == 0.5
 
 
 def test_calibration_settings_missing_key():
-    mapping = {key: value for key, value in CALIBRATION_MAPPING.items() if key != "num_steps"}
+    mapping = {key: value for key, value in CALIBRATION_MAPPING.items() if key != "num_epochs"}
 
-    with pytest.raises(ValueError, match="num_steps"):
+    with pytest.raises(ValueError, match="num_epochs"):
         CalibrationSettings.from_mapping(mapping)
 
 
-@pytest.mark.parametrize("name", ["num_steps", "batch_size", "validation_interval"])
+@pytest.mark.parametrize("name", ["num_epochs", "batch_size", "validation_interval"])
 def test_calibration_settings_bad_count(name):
     with pytest.raises(ValueError, match=name):
         CalibrationSettings.from_mapping(CALIBRATION_MAPPING | {name: 0})

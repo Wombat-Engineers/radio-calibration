@@ -118,7 +118,7 @@ flowchart LR
 | Core | The `Cell` record, the typed settings `SimulationSettings` and `CalibrationSettings`, and the checks of the input data | [`radio_calibration/core/`](radio_calibration/core/) |
 | Simulation | All radio propagation calls of Sionna RT: scene load, RSRP from the path solver, and the neural radio material | [`radio_calibration/simulation/`](radio_calibration/simulation/) |
 | Calibration | Loss, power scale, training loop, and file format of the calibration result. It uses Dr.Jit and has no Sionna RT import. | [`radio_calibration/calibration/`](radio_calibration/calibration/) |
-| Evaluation | Error statistics of a calibrated model, also by group, and the distance to the nearest record. It does no ray tracing. | [`radio_calibration/evaluation/`](radio_calibration/evaluation/) |
+| Evaluation | Error statistics of a calibrated model, also by group, the distance to the nearest record, and the resource use of a block of code (`ResourceMonitor`). It does no ray tracing. | [`radio_calibration/evaluation/`](radio_calibration/evaluation/) |
 | Preprocessing | The formats of `cells.csv` and `mdt.csv`, their validation rules, the long format of `lab/data/processed/`, the division into parts, and the change to the arrays of `radio_calibration` | [`lab/preprocessing/`](lab/preprocessing/) |
 | Analysis | The error of each (record, cell) pair as a table, and the bootstrap comparison of two models | [`lab/analysis/`](lab/analysis/) |
 | Scenario | Height map, site placement, traffic model, MDT records | [`lab/scenario/`](lab/scenario/) |
@@ -136,6 +136,8 @@ flowchart LR
 | [Mitsuba](https://github.com/mitsuba-renderer/mitsuba3) 3.9.1 | Renderer below Sionna RT. Sionna RT pins this version. | `radio-calibration` | Critical |
 | [Dr.Jit](https://github.com/mitsuba-renderer/drjit) 1.5.0 | Just-in-time compiler below Mitsuba. Sionna RT pins this version. The calibration uses its automatic differentiation, its neural network module, and its AdamW optimizer. | `radio-calibration` | Critical |
 | NumPy, pandas, SciPy | Arrays, the history table, and the nearest-record distance | `radio-calibration` | Critical |
+| [psutil](https://github.com/giampaolo/psutil) | Memory and CPU use of the process for `ResourceMonitor` | `radio-calibration` | Low |
+| [nvidia-ml-py](https://pypi.org/project/nvidia-ml-py/) | NVML bindings of NVIDIA: GPU memory and GPU use for `ResourceMonitor` | `radio-calibration` | Low |
 | [PyTorch](https://pytorch.org/) 2.15.0+cu134 | Random seeds and device selection of the notebooks. The calibration does not use it. | `lab` | Low |
 | [Hydra](https://hydra.cc/) | Experiment configuration | `lab` | Critical for `lab` |
 
@@ -283,7 +285,7 @@ dependencies, not `lab`. The system needs an NVIDIA GPU: the import sets the Mit
 | `positions` | float array `[n, 3]` | UE positions in meters, in the coordinate system of the scene |
 | `rsrp_dbm` | float array `[n, len(cells)]` | Measured RSRP in dBm. Row `i` is the record at `positions[i]`, column `j` is `cells[j]`. NaN shows that the record does not have the cell. |
 | `simulation` | `SimulationSettings` | Frequency, UE antenna, and the arguments of the Sionna RT path solver |
-| `calibration` | `CalibrationSettings` | Network size, optimizer, number of steps, and batch size |
+| `calibration` | `CalibrationSettings` | Network size, optimizer, number of epochs, and batch size |
 
 The checks at the boundary (`check_cells`, `check_measurements`) reject data in another
 format. For example, an RSRP array with 3 columns for 2 cells gives:
@@ -350,9 +352,9 @@ calibration = CalibrationSettings(
     hidden_units=32,
     learning_rate=0.01,
     weight_decay=0.01,
-    num_steps=50,
+    num_epochs=2,
     batch_size=8,
-    validation_interval=10,
+    validation_interval=1,
     scale_decay=0.9,
 )
 
@@ -557,7 +559,8 @@ The parts of the method are these:
   because Sionna RT gives no gradients in the loop mode `symbolic`.
 
 [`lab/configs/calibration.yaml`](lab/configs/calibration.yaml) sets the network, the optimizer, the
-number of steps, and the batch size. The Sionna RT configuration stays in
+number of epochs, and the batch size. Each epoch puts the train records in a new random
+order and divides them into batches, thus each record is in one batch of each epoch. The Sionna RT configuration stays in
 [`lab/configs/simulation.yaml`](lab/configs/simulation.yaml).
 
 ```bash
@@ -569,7 +572,8 @@ The notebook writes these files to `lab/outputs/calibration/`:
 | File | Content |
 |---|---|
 | `calibration.npz` | The weights of the network, the network structure, the normalization of the positions, and the power scale. `CalibratedModel.load` reads it and gives a model with its scale. |
-| `history.csv` | The loss, the power scale, and the validation loss at each step |
+| `history.csv` | The epoch, the loss, the power scale, the validation loss, and the run time (`step_seconds`) at each step |
+| `resources.csv` | The samples of `ResourceMonitor` during the calibration: GPU memory and GPU use of the device, memory and CPU use of the process |
 
 Each run gives different weights. [Reproducibility](#reproducibility) gives the cause.
 
@@ -604,7 +608,8 @@ The notebook gives these results:
 - the error by cell and by distance from the cell;
 - the error by distance to the nearest train record, because a random division puts test
   records near train records ([Dempsey et al.](https://arxiv.org/abs/2411.17752));
-- the difference of the MAE of two models, with a bootstrap interval over the records.
+- the difference of the MAE of two models, with a bootstrap interval over the records;
+- the run time, the memory, and the CPU and GPU use of the simulation of each model.
 
 [`lab/configs/evaluation.yaml`](lab/configs/evaluation.yaml) sets the quantiles, the number of
 distance bands, and the bootstrap. `error_statistics`, `grouped_statistics`, and
@@ -677,7 +682,7 @@ radio-calibration/
 │   ├── core/             Cell record, typed settings, checks of the input data
 │   ├── simulation/       Sionna RT calls: scene load, RSRP, neural material
 │   ├── calibration/      Loss, power scale, training loop, result file
-│   └── evaluation/       Error statistics, statistics by group, nearest-record distance
+│   └── evaluation/       Error statistics, statistics by group, nearest-record distance, resource use
 ├── lab/                  Package lab: experiments and evaluation (pyproject.toml of its own)
 │   ├── scenario/         Scenario generator: height map, sites, traffic, MDT records
 │   ├── preprocessing/    cells.csv and mdt.csv formats, validation rules, parts, arrays

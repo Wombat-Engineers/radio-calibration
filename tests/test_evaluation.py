@@ -1,13 +1,22 @@
 """Tests for radio_calibration.evaluation."""
 
 import math
+import time
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pynvml
 import pytest
 
+import radio_calibration.evaluation.resources as resources
 from radio_calibration.calibration import dbm_to_mw, smape
-from radio_calibration.evaluation import error_statistics, grouped_statistics, nearest_distance
+from radio_calibration.evaluation import (
+    ResourceMonitor,
+    error_statistics,
+    grouped_statistics,
+    nearest_distance,
+)
 
 QUANTILES = (0.5, 0.9)
 NAN = np.nan
@@ -181,3 +190,120 @@ def test_nearest_distance():
 def test_nearest_distance_empty():
     with pytest.raises(ValueError, match="minimum"):
         nearest_distance(np.zeros((2, 3)), np.empty((0, 3)))
+
+
+# --- ResourceMonitor ---
+
+MIB = 2**20
+
+
+class FakeProcess:
+    """A psutil.Process with a fixed memory and a fixed CPU use."""
+
+    def __init__(self, rss_mib=100.0, cpu_percent=50.0):
+        self.rss_mib = rss_mib
+        self.cpu = cpu_percent
+
+    def memory_info(self):
+        return SimpleNamespace(rss=self.rss_mib * MIB)
+
+    def cpu_percent(self, interval=None):
+        return self.cpu
+
+
+@pytest.fixture
+def fake_nvml(monkeypatch):
+    """Replace NVML with a GPU that uses 1234 MiB and 56 %."""
+    calls = {"shutdown": 0}
+
+    def shutdown():
+        calls["shutdown"] += 1
+
+    monkeypatch.setattr(resources.pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(resources.pynvml, "nvmlShutdown", shutdown)
+    monkeypatch.setattr(resources.pynvml, "nvmlDeviceGetHandleByIndex", lambda index: "gpu")
+    monkeypatch.setattr(
+        resources.pynvml,
+        "nvmlDeviceGetMemoryInfo",
+        lambda handle: SimpleNamespace(used=1234 * MIB),
+    )
+    monkeypatch.setattr(
+        resources.pynvml, "nvmlDeviceGetUtilizationRates", lambda handle: SimpleNamespace(gpu=56)
+    )
+    return calls
+
+
+def test_resource_monitor_samples():
+    with ResourceMonitor(interval_s=0.05) as monitor:
+        time.sleep(0.3)
+    samples = monitor.samples
+
+    assert list(samples.columns) == list(resources.SAMPLE_COLUMNS)
+    assert len(samples) >= 2
+    assert samples["seconds"].is_monotonic_increasing
+    assert samples["seconds"].iloc[-1] >= 0.3
+    assert (samples["rss_mib"] > 0).all()
+    assert math.isnan(samples["cpu_percent"].iloc[0])
+
+
+def test_resource_monitor_reads_nvml(fake_nvml):
+    with ResourceMonitor(interval_s=0.05):
+        pass
+    with ResourceMonitor(interval_s=0.05) as monitor:
+        pass
+
+    assert (monitor.samples["gpu_memory_mib"] == 1234.0).all()
+    assert (monitor.samples["gpu_utilization_percent"] == 56.0).all()
+    assert fake_nvml["shutdown"] == 2
+
+
+def test_resource_monitor_no_nvml(monkeypatch):
+    def fail():
+        raise pynvml.NVMLError(pynvml.NVML_ERROR_DRIVER_NOT_LOADED)
+
+    monkeypatch.setattr(resources.pynvml, "nvmlInit", fail)
+    with ResourceMonitor(interval_s=0.05) as monitor:
+        pass
+
+    assert monitor.samples["gpu_memory_mib"].isna().all()
+    assert monitor.samples["gpu_utilization_percent"].isna().all()
+    assert (monitor.samples["rss_mib"] > 0).all()
+
+
+@pytest.mark.parametrize("interval_s", [0.0, -1.0])
+def test_resource_monitor_bad_interval(interval_s):
+    with pytest.raises(ValueError, match="interval_s"):
+        ResourceMonitor(interval_s=interval_s)
+
+
+def test_resource_monitor_samples_running():
+    with ResourceMonitor(interval_s=0.05) as monitor, pytest.raises(RuntimeError, match="after"):
+        monitor.samples  # noqa: B018
+
+
+def test_resource_monitor_samples_not_run():
+    with pytest.raises(RuntimeError, match="after"):
+        ResourceMonitor().samples  # noqa: B018
+
+
+def test_resource_monitor_exception_in_block():
+    monitor = ResourceMonitor(interval_s=0.05)
+    with pytest.raises(KeyError), monitor:
+        raise KeyError("stop")
+
+    assert monitor._thread is None
+    assert len(monitor.samples) == 2
+
+
+def test_resource_monitor_summary(monkeypatch, fake_nvml):
+    monkeypatch.setattr(resources.psutil, "Process", lambda: FakeProcess(100.0, 50.0))
+    with ResourceMonitor(interval_s=0.05) as monitor:
+        time.sleep(0.15)
+    summary = monitor.summary()
+
+    assert summary["seconds"] == monitor.samples["seconds"].iloc[-1]
+    assert summary["peak_gpu_memory_mib"] == 1234.0
+    assert summary["mean_gpu_utilization_percent"] == 56.0
+    assert summary["peak_rss_mib"] == 100.0
+    # The first sample has no CPU use.
+    assert summary["mean_cpu_percent"] == 50.0

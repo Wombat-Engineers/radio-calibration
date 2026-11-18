@@ -24,11 +24,12 @@ network:
 learning_rate: 0.01
 # Assumption.
 weight_decay: 0.01
-# Number of gradient steps. Assumption.
-num_steps: 50                     # Recommended: 3000
-# Number of MDT records in one gradient step. Assumption.
+# Number of epochs. In one epoch, each train record is in one batch. Assumption.
+num_epochs: 2                     # Recommended: 200
+# Number of MDT records in one gradient step. The last batch of an epoch can have fewer
+# records. Assumption.
 batch_size: 8                     # Recommended: 16
-# The calibration calculates the validation loss after each interval of steps. Assumption.
-validation_interval: 10           # Recommended: 100
+# The calibration calculates the validation loss after each interval of epochs. Assumption.
+validation_interval: 1            # Recommended: 10
 # Decay of the moving average of the power scale (Eq. 42). Assumption.
 scale_decay: 0.9

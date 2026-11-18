@@ -1,5 +1,6 @@
 """Tests for radio_calibration.api. They use a small scene, a small network, and CUDA."""
 
+import math
 import subprocess
 import sys
 
@@ -36,8 +37,16 @@ def fit(scene, positions=POSITIONS, rsrp_dbm=RSRP_DBM):
 def test_fit_returns_model_and_history(scene):
     model, history = fit(scene)
 
-    assert list(history.columns) == ["step", "loss", "scale", "validation_loss"]
-    assert len(history) == CALIBRATION.num_steps
+    assert list(history.columns) == [
+        "step",
+        "epoch",
+        "loss",
+        "scale",
+        "validation_loss",
+        "step_seconds",
+    ]
+    steps_per_epoch = math.ceil(len(POSITIONS) / CALIBRATION.batch_size)
+    assert len(history) == CALIBRATION.num_epochs * steps_per_epoch
     assert model.material.scale > 0
     assert all(obj.radio_material is model.material for obj in scene.objects.values())
 

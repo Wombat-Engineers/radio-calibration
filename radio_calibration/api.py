@@ -115,7 +115,8 @@ class CalibratedModel:
 
         Returns:
             The calibrated model, and the history of the steps (one row for each step, with
-            the columns `step`, `loss`, `scale`, and `validation_loss`).
+            the columns `step`, `epoch`, `loss`, `scale`, `validation_loss`, and
+            `step_seconds`).
 
         Raises:
             ValueError: If the cells or the measurements are not valid, if there is no train

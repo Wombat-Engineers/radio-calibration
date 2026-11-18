@@ -9,6 +9,7 @@ import mitsuba as mi
 import numpy as np
 import pytest
 
+import radio_calibration.calibration.train as train_module
 from radio_calibration.calibration import (
     absolute_log_error,
     calibrate,
@@ -34,8 +35,9 @@ CALIBRATION = CalibrationSettings(
     **NETWORK,
     learning_rate=1e-2,
     weight_decay=0.0,
-    num_steps=2,
-    batch_size=2,
+    num_epochs=2,
+    # Four records: each epoch has a batch of 3 records and a batch of 1 record.
+    batch_size=3,
     validation_interval=1,
     scale_decay=0.5,
 )
@@ -194,9 +196,20 @@ def run_calibrate(neural_scene, rsrp_dbm=RSRP_DBM, **changes):
 def test_calibrate_history_columns(neural_scene):
     result = run_calibrate(neural_scene)
 
-    assert list(result.history.columns) == ["step", "loss", "scale", "validation_loss"]
-    assert result.history["step"].tolist() == [0, 1]
-    assert np.isfinite(result.history.to_numpy()).all()
+    assert list(result.history.columns) == [
+        "step",
+        "epoch",
+        "loss",
+        "scale",
+        "validation_loss",
+        "step_seconds",
+    ]
+    assert result.history["step"].tolist() == [0, 1, 2, 3]
+    assert result.history["epoch"].tolist() == [0, 0, 1, 1]
+    assert np.isfinite(result.history.drop(columns="validation_loss").to_numpy()).all()
+    # The validation is after the last step of each epoch.
+    assert np.isnan(result.history["validation_loss"]).tolist() == [True, False, True, False]
+    assert (result.history["step_seconds"] > 0).all()
 
 
 def test_calibrate_sets_material_scale(neural_scene):
@@ -210,7 +223,40 @@ def test_calibrate_sets_material_scale(neural_scene):
 def test_calibrate_validation_interval(neural_scene):
     result = run_calibrate(neural_scene, validation_interval=2)
 
-    assert np.isnan(result.history["validation_loss"]).tolist() == [True, False]
+    assert np.isnan(result.history["validation_loss"]).tolist() == [True, True, True, False]
+
+
+def record_batches(monkeypatch) -> list[np.ndarray]:
+    """Record the positions that `calibrate` gives to `compute_rsrp_mw` in each step."""
+    batches = []
+
+    def recording(scene, cells, positions, simulation):
+        batches.append(positions.copy())
+        return compute_rsrp_mw(scene, cells, positions, simulation)
+
+    monkeypatch.setattr(train_module, "compute_rsrp_mw", recording)
+    return batches
+
+
+def test_calibrate_epoch_uses_each_record(neural_scene, monkeypatch):
+    batches = record_batches(monkeypatch)
+
+    result = run_calibrate(neural_scene)
+
+    assert [len(batch) for batch in batches] == [3, 1, 3, 1]
+    for epoch in (0, 1):
+        steps = np.flatnonzero(result.history["epoch"] == epoch)
+        used = np.concatenate([batches[step] for step in steps])
+        assert sorted(map(tuple, used)) == sorted(map(tuple, POSITIONS))
+
+
+def test_calibrate_batch_larger_than_records(neural_scene, monkeypatch):
+    batches = record_batches(monkeypatch)
+
+    result = run_calibrate(neural_scene, batch_size=8)
+
+    assert result.history["epoch"].tolist() == [0, 1]
+    assert [len(batch) for batch in batches] == [4, 4]
 
 
 def test_calibrate_changes_network(neural_scene):

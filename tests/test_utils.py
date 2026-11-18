@@ -179,7 +179,7 @@ def test_calibration_settings_from_config():
     settings = calibration_settings(cfg)
 
     assert settings.hidden_units == cfg.calibration.network.hidden_units
-    assert settings.num_steps == cfg.calibration.num_steps
+    assert settings.num_epochs == cfg.calibration.num_epochs
     assert settings.scale_decay == cfg.calibration.scale_decay
 
 

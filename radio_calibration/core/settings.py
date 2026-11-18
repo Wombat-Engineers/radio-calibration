@@ -82,13 +82,15 @@ class CalibrationSettings:
         hidden_units: Number of neurons in each hidden layer.
         learning_rate: Learning rate of the AdamW optimizer.
         weight_decay: Weight decay of the AdamW optimizer.
-        num_steps: Number of gradient steps.
-        batch_size: Number of records in one gradient step.
-        validation_interval: Number of steps between two calculations of the validation loss.
+        num_epochs: Number of epochs. In one epoch, each train record is in one batch.
+        batch_size: Number of records in one gradient step. The last batch of an epoch can
+            have fewer records.
+        validation_interval: Number of epochs between two calculations of the validation
+            loss.
         scale_decay: Decay of the moving average of the power scale (Eq. 42).
 
     Raises:
-        ValueError: If `num_steps`, `batch_size`, or `validation_interval` is less than 1.
+        ValueError: If `num_epochs`, `batch_size`, or `validation_interval` is less than 1.
     """
 
     encoding_octaves: int
@@ -96,13 +98,13 @@ class CalibrationSettings:
     hidden_units: int
     learning_rate: float
     weight_decay: float
-    num_steps: int
+    num_epochs: int
     batch_size: int
     validation_interval: int
     scale_decay: float
 
     def __post_init__(self) -> None:
-        for name in ("num_steps", "batch_size", "validation_interval"):
+        for name in ("num_epochs", "batch_size", "validation_interval"):
             _check_count(name, getattr(self, name))
 
     @classmethod
@@ -113,7 +115,7 @@ class CalibrationSettings:
 
         Args:
             mapping: The keys `network` (`encoding_octaves`, `hidden_layers`,
-                `hidden_units`), `learning_rate`, `weight_decay`, `num_steps`,
+                `hidden_units`), `learning_rate`, `weight_decay`, `num_epochs`,
                 `batch_size`, `validation_interval`, and `scale_decay`.
 
         Returns:
@@ -129,7 +131,7 @@ class CalibrationSettings:
             hidden_units=int(_value(network, "hidden_units", "network.")),
             learning_rate=float(_value(mapping, "learning_rate", "")),
             weight_decay=float(_value(mapping, "weight_decay", "")),
-            num_steps=int(_value(mapping, "num_steps", "")),
+            num_epochs=int(_value(mapping, "num_epochs", "")),
             batch_size=int(_value(mapping, "batch_size", "")),
             validation_interval=int(_value(mapping, "validation_interval", "")),
             scale_decay=float(_value(mapping, "scale_decay", "")),
