@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig
@@ -40,7 +41,6 @@ def pretrain_model(
     data: ScenarioData,
     device: torch.device,
     channels: Sequence[str] = FEATURE_NAMES,
-    residual: bool = False,
 ) -> tuple[RadioMapModel, pd.DataFrame]:
     """Pretrain a new model on the layouts of `maps.npz`."""
     return RadioMapModel.pretrain(
@@ -51,7 +51,6 @@ def pretrain_model(
         device,
         floor_db(cfg, data),
         channels,
-        residual,
     )
 
 
@@ -60,7 +59,6 @@ def new_model(
     data: ScenarioData,
     device: torch.device,
     channels: Sequence[str] = FEATURE_NAMES,
-    residual: bool = False,
 ) -> RadioMapModel:
     """Make a model with new parameters and no pretraining.
 
@@ -71,14 +69,14 @@ def new_model(
     torch.manual_seed(cfg.seed)
     network = make_network(len(channels), calibration)
     normalization = Normalization.fit(data.maps.variants, floor_db(cfg, data))
-    return RadioMapModel(network, normalization, device, channels, residual)
+    return RadioMapModel(network, normalization, device, channels)
 
 
 def fine_tune_model(
     cfg: DictConfig,
     data: ScenarioData,
     model: RadioMapModel,
-    train: tuple | None = None,
+    train: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """Fine-tune all parameters of the model on the train records of the scenario.
 

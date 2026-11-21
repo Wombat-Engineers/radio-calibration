@@ -1,6 +1,8 @@
 """Tests for radio_calibration.evaluation."""
 
 import math
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -10,7 +12,6 @@ import pynvml
 import pytest
 
 import radio_calibration.evaluation.resources as resources
-from radio_calibration.calibration import dbm_to_mw, smape
 from radio_calibration.core import MapInputs, RadioMapGrid
 from radio_calibration.evaluation import (
     ResourceMonitor,
@@ -18,8 +19,9 @@ from radio_calibration.evaluation import (
     error_statistics,
     fit_offset,
     grouped_statistics,
+    log_error,
     map_statistics,
-    nearest_distance,
+    smape,
     spm_inputs,
 )
 
@@ -36,6 +38,35 @@ def arrays_with_errors(errors) -> tuple[np.ndarray, np.ndarray]:
     errors = np.asarray(errors, dtype=float)
     measured = np.full((errors.size, 1), -80.0)
     return measured, measured - errors[:, np.newaxis]
+
+
+# --- log_error and smape ---
+
+
+def test_log_error_sign():
+    assert log_error(np.array([-80.0]), np.array([-90.0])).tolist() == [10.0]
+
+
+def test_smape_equal():
+    assert smape(np.array([2.0]), np.array([2.0]), 0.0).tolist() == [0.0]
+
+
+def test_smape_value():
+    # |1 - 3| / (1 + 3) = 0.5
+    assert smape(np.array([1.0]), np.array([3.0]), 0.0).tolist() == [0.5]
+
+
+def test_smape_zero_label_epsilon():
+    assert smape(np.array([0.0]), np.array([0.0]), 1e-30).tolist() == [0.0]
+
+
+def test_evaluation_imports_no_torch():
+    # A new process: the test process has imported torch already.
+    code = "import sys, radio_calibration.evaluation; print('torch' in sys.modules)"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "False"
 
 
 # --- error_statistics ---
@@ -93,7 +124,7 @@ def test_error_statistics_smape_matches_loss():
     measured = rng.uniform(-120.0, -60.0, size=(50, 1))
     simulated = rng.uniform(-120.0, -60.0, size=(50, 1))
 
-    expected = np.mean(smape(dbm_to_mw(measured), dbm_to_mw(simulated), 0.0))
+    expected = np.mean(smape(10.0 ** (measured / 10.0), 10.0 ** (simulated / 10.0), 0.0))
     assert error_statistics(measured, simulated, QUANTILES)["smape"] == pytest.approx(expected)
 
 
@@ -177,9 +208,6 @@ def test_grouped_statistics_interval_order():
 def test_grouped_statistics_shape_mismatch():
     with pytest.raises(ValueError, match="shape"):
         grouped_statistics(MEASURED, SIMULATED, np.array(["a", "b"]), QUANTILES)
-
-
-# --- nearest_distance ---
 
 
 # --- map_statistics ---
@@ -309,18 +337,6 @@ def test_spm_inputs():
     assert los[:2, 0].tolist() == [True, False]
     assert clutter[:2, 0].tolist() == [0.0, 0.5]
     assert inside.tolist() == [True, True, False]
-
-
-def test_nearest_distance():
-    reference = np.array([[0.0, 0.0], [10.0, 0.0]])
-    points = np.array([[1.0, 0.0, 5.0], [9.0, 1.0, 0.0]])
-
-    np.testing.assert_allclose(nearest_distance(points, reference), [1.0, math.sqrt(2.0)])
-
-
-def test_nearest_distance_empty():
-    with pytest.raises(ValueError, match="minimum"):
-        nearest_distance(np.zeros((2, 3)), np.empty((0, 3)))
 
 
 # --- ResourceMonitor ---

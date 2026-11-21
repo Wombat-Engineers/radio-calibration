@@ -6,3 +6,9 @@ defaults:
   - _self_
 
 name: munich_map_errors
+
+# Division of the MDT records. `random`: each record goes to one part at random.
+# The fractions are assumptions.
+split:
+  method: random
+  fractions: [0.7, 0.1, 0.2]

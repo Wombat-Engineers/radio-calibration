@@ -92,7 +92,7 @@ def is_outdoor(scene: sionna.rt.Scene, positions: np.ndarray) -> np.ndarray:
 def cell_buildings(
     height_map: HeightMap, grid: RadioMapGrid, min_building_height: float
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Summarize the buildings of the height map in each cell of a radio-map grid.
+    """Summarize the buildings of the height map in each grid cell of a radio-map grid.
 
     The grid must start at the corner of the height map, and its cell size must be a whole
     multiple of the tile size. A part of a grid cell outside the height map has no building.

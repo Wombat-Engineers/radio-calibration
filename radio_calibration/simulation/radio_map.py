@@ -22,7 +22,7 @@ def scene_grid(scene: sionna.rt.Scene, cell_size: float, height: float) -> Radio
 
     Returns:
         The grid. It starts at the smallest x and the smallest y of the scene. It has enough
-        cells to cover the scene.
+        grid cells to cover the scene.
     """
     bbox = scene.mi_scene.bbox()
     x_min, y_min = float(bbox.min.x), float(bbox.min.y)
@@ -81,7 +81,7 @@ def compute_path_gain_map(
             maps.append(radio_map.path_gain.numpy().astype(float))
         finally:
             remove_cells(scene, batch)
-    return np.concatenate(maps) if maps else np.zeros((0, grid.ny, grid.nx))
+    return np.concatenate(maps)
 
 
 def compute_map_inputs(

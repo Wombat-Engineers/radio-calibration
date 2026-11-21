@@ -230,7 +230,22 @@ def test_load_config_evaluation():
     evaluation = load_config().evaluation
 
     assert all(0 <= quantile <= 1 for quantile in evaluation.quantiles)
-    assert evaluation.num_bins > 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        path.stem
+        for path in sorted((CONFIG_DIR / "scenario").glob("*.yaml"))
+        if path.stem != "munich_base"
+    ],
+)
+def test_each_scenario_has_split(name):
+    assert load_config(f"scenario={name}").scenario.split.method in {"random", "site", "spatial"}
+
+
+def test_new_site_split_has_no_fractions():
+    assert "fractions" not in load_config("scenario=munich_new_site").scenario.split
 
 
 # --- runs ---
@@ -255,6 +270,13 @@ def test_result_paths():
     dirs = scenario_dirs("munich_new_site")
 
     assert result_paths("munich_new_site") == (dirs.raw, dirs.processed, dirs.outputs, CONFIG_DIR)
+
+
+def test_result_paths_holds_hydra_runs():
+    # The Hydra runs of the generator are in the archive through the outputs directory.
+    run = OUTPUTS_DIR / "munich_map_errors" / "scenario" / "2026-11-21" / "10-00-00"
+
+    assert any(run.is_relative_to(path) for path in result_paths("munich_map_errors"))
 
 
 def test_select_notebooks_default():

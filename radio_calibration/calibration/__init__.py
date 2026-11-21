@@ -8,7 +8,6 @@ from radio_calibration.calibration.features import (
     sensitivity_floor_db,
 )
 from radio_calibration.calibration.io import load_model, save_model
-from radio_calibration.calibration.loss import absolute_log_error, dbm_to_mw, log_error, smape
 from radio_calibration.calibration.train import (
     HISTORY_COLUMNS,
     PretrainResult,
@@ -17,6 +16,7 @@ from radio_calibration.calibration.train import (
     predict_db,
     predict_maps_db,
     pretrain,
+    validation_count,
 )
 from radio_calibration.calibration.unet import UNet
 
@@ -26,18 +26,15 @@ __all__ = [
     "Normalization",
     "PretrainResult",
     "UNet",
-    "absolute_log_error",
     "base_path_gain_db",
-    "dbm_to_mw",
     "feature_tensor",
     "fine_tune",
     "load_model",
-    "log_error",
     "make_network",
     "predict_db",
     "predict_maps_db",
     "pretrain",
     "save_model",
     "sensitivity_floor_db",
-    "smape",
+    "validation_count",
 ]

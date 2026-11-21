@@ -65,8 +65,8 @@ class UNet(nn.Module):
             for level in reversed(range(depth))
         )
         self.output = nn.Conv2d(base_channels, 1, kernel_size=1)
-        # Zero output at the start: a direct model starts at the mean path gain of the
-        # pretraining inputs, and a residual model starts equal to its base map.
+        # Zero output at the start: a new model gives the mean path gain of the pretraining
+        # inputs.
         nn.init.zeros_(self.output.weight)
         nn.init.zeros_(self.output.bias)
 

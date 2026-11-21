@@ -27,7 +27,7 @@ class SimulationSettings:
         radio_map: Arguments of a call of the Sionna RT `RadioMapSolver`. The geometry
             arguments (`center`, `orientation`, `size`, `cell_size`) come from the grid,
             not from this mapping.
-        radio_map_cell_size_m: Length of one side of a radio-map cell, in meters.
+        radio_map_cell_size_m: Length of one side of a grid cell of the radio map, in meters.
         radio_map_tx_batch_size: Maximum number of transmitters in one solver call.
 
     Raises:

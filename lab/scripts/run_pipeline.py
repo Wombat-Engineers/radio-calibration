@@ -19,22 +19,9 @@ is 1 if a step failed.
 import argparse
 import sys
 from datetime import datetime
-from pathlib import Path
 
-from utils import load_config, scenario_dirs
+from utils import load_config
 from utils.runs import notebook_command, pack_results, run_steps, select_notebooks
-
-
-def _scenario_runs_since(scenario: str, started: datetime) -> list[Path]:
-    """Return the Hydra run directories `<date>/<time>` that the scenario made after `started`."""
-    runs = scenario_dirs(scenario).outputs / "scenario"
-    if not runs.is_dir():
-        return []
-    return sorted(
-        path
-        for path in runs.glob("*/*")
-        if path.is_dir() and path.stat().st_mtime >= started.timestamp()
-    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,9 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = [[sys.executable, "-m", "scenario", f"scenario={scenario}"]]
     commands += [notebook_command(path) for path in notebooks]
     steps = run_steps(commands)
-    archive = pack_results(
-        scenario, started, steps, extra_paths=_scenario_runs_since(scenario, started)
-    )
+    archive = pack_results(scenario, started, steps)
     print(f"\nArchive: {archive}")
     return 0 if all(step.returncode == 0 for step in steps) else 1
 

@@ -20,7 +20,7 @@ the experiments that use it.
 
 ## Overview
 
-A radio map gives the path gain at each cell of a grid around a transmitter.
+A radio map gives the path gain in each grid cell of an area around a transmitter.
 [Sionna RT](https://nvlabs.github.io/sionna/rt/) computes radio maps with a ray tracer.
 The result depends on the 3D map of the buildings, the materials, and the antenna patterns.
 A real 3D map has errors: a building is at a different position, has a different height, or
@@ -119,7 +119,7 @@ flowchart LR
 | [Mitsuba](https://github.com/mitsuba-renderer/mitsuba3) 3.9.1 | Renderer below Sionna RT, and the geometric rays of the height map and the line-of-sight map. Sionna RT pins this version. | `radio-calibration` | Critical |
 | [Dr.Jit](https://github.com/mitsuba-renderer/drjit) 1.5.0 | Just-in-time compiler below Mitsuba. Sionna RT pins this version. | `radio-calibration` | Critical |
 | [PyTorch](https://pytorch.org/) 2.15.0+cu134 | The U-Net, its training, and its model file | `radio-calibration` | Critical |
-| NumPy, pandas, SciPy | Arrays, tables, least squares, and the nearest-record distance | `radio-calibration` | Critical |
+| NumPy, pandas | Arrays, tables, and least squares | `radio-calibration` | Critical |
 | [psutil](https://github.com/giampaolo/psutil) | Memory and CPU use of the process for `ResourceMonitor` | `radio-calibration` | Low |
 | [nvidia-ml-py](https://pypi.org/project/nvidia-ml-py/) | NVML bindings of NVIDIA: GPU memory and GPU use for `ResourceMonitor` | `radio-calibration` | Low |
 | [Hydra](https://hydra.cc/) | Experiment configuration | `lab` | Critical for `lab` |
@@ -182,8 +182,8 @@ selected scenario and each other file of `lab/configs/` into its own key:
 |---|---|---|
 | `scenario` | [`lab/configs/scenario/<name>.yaml`](lab/configs/scenario/) | The scenario. The default is `munich_map_errors`. Select another one with `scenario=<name>`. |
 | `simulation` | [`lab/configs/simulation.yaml`](lab/configs/simulation.yaml) | Sionna RT: frequency and radio-map solver |
-| `calibration` | [`lab/configs/calibration.yaml`](lab/configs/calibration.yaml) | The U-Net, the loss, the pretraining, and the fine-tuning |
-| `evaluation` | [`lab/configs/evaluation.yaml`](lab/configs/evaluation.yaml) | Quantiles and distance bands of the evaluation |
+| `calibration` | [`lab/configs/calibration.yaml`](lab/configs/calibration.yaml) | The U-Net, the validation fraction, the pretraining, and the fine-tuning |
+| `evaluation` | [`lab/configs/evaluation.yaml`](lab/configs/evaluation.yaml) | Quantiles of the absolute error |
 
 It also has these values:
 
@@ -199,7 +199,7 @@ It also has these values:
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `radio.frequency_hz` | number | `2.6e9` | Carrier frequency. |
-| `radio_map_cell_size_m` | number | `20` | Side of a radio-map cell, in meters. It must be a multiple of `scenario.grid.tile_size_m`. |
+| `radio_map_cell_size_m` | number | `20` | Side of a grid cell of the radio map, in meters. It must be a multiple of `scenario.grid.tile_size_m`. |
 | `radio_map_tx_batch_size` | integer | `153` | Maximum number of transmitters in one solver call. The file gives the memory and the time that were measured. |
 | `radio_map.samples_per_tx` | integer | `1000000` | Number of rays for each transmitter. The recommended value is `10000000`. |
 | `radio_map.max_depth` | integer | `5` | Maximum number of interactions of a ray. |
@@ -240,7 +240,7 @@ shared settings, and each scenario file adds its own part.
 | `munich_new_site` | The model predicts the cells of a site with no MDT record, as for a new site of a network plan | The test part has all pairs of the cells of `test_sites`. No train pair is for such a cell. |
 | `munich_unmeasured_area` | The model predicts an area with no MDT record | By blocks of 200 m of the reported position |
 | `munich_sparse_mdt` | The model needs few MDT records | At random. The fine-tuning uses 50, 100, and 200 train records. The baselines use the same records. |
-| `munich_ablation` | Each part of the model is necessary | At random. Each variant removes the pretraining or one group of input channels, or uses the residual output. |
+| `munich_ablation` | Each part of the model is necessary | At random. Each variant removes the pretraining or one group of input channels. |
 
 Each scenario has these directories:
 
@@ -271,7 +271,7 @@ the Mitsuba variant `cuda_ad_mono_polarized` for the full process.
 | `positions` | float array `[n, 3]` | UE positions in meters, in the coordinate system of the scene |
 | `rsrp_dbm` | float array `[n, len(cells)]` | Measured RSRP in dBm. NaN shows that the record does not have the cell. |
 | `simulation` | `SimulationSettings` | Frequency and the arguments of the Sionna RT radio-map solver |
-| `calibration` | `CalibrationSettings` | U-Net size, loss, pretraining, and fine-tuning |
+| `calibration` | `CalibrationSettings` | U-Net size, validation fraction, pretraining, and fine-tuning |
 
 The checks at the boundary (`check_cells`, `check_measurements`) reject data in another
 format. For example, an RSRP array with 3 columns for 2 cells gives:
@@ -349,11 +349,10 @@ $$\hat{G}_c(g) = \mu + \sigma \, f_\theta(\mathbf{x}_c)(g) \quad \text{(dB)}.$$
   scene, with the array of the cell. A grid cell with no ray, or with a path gain below
   $G_{\mathrm{floor}}$ (`sensitivity_floor_db`, 10 dB below the smallest path gain that a UE
   can report), gets $G_{\mathrm{floor}}$ in this channel.
-- The model can also use a residual output,
-  $\max\big(G^{\mathrm{RT}}_c(g), G_{\mathrm{floor}}\big) + f_\theta(\mathbf{x}_c)(g)$
-  (`residual=True`). The scenario `munich_ablation` compares the two outputs. The direct
-  output is the default: in the first runs with the development values, it gave a smaller
-  error than the residual output.
+- The first version also had a residual output,
+  $\max\big(G^{\mathrm{RT}}_c(g), G_{\mathrm{floor}}\big) + f_\theta(\mathbf{x}_c)(g)$.
+  In the first runs with the development values, it gave a larger MDT test RMSE than the
+  direct output (21.3 dB against 13.6 dB). The code has only the direct output.
 
 The RSRP of a record is the reference-signal power of the cell plus $\hat{G}_c$ of the grid cell
 that holds the record. The loss is the mean absolute error (MAE) in dB, in the pretraining and
@@ -409,8 +408,8 @@ The generator does these steps:
 5. For each changed pretraining scene, it calculates the target maps of its layouts.
 
 With the default values, one scenario needs 6 calls of the radio-map solver. Most of the run
-time goes to the changes of the buildings. To use real data, write `cells.csv` and `mdt.csv`
-with the same columns, and set `scenario.synthetic: false`. A real scenario has no true map.
+time goes to the changes of the buildings. The generator makes only synthetic scenarios
+(`scenario.synthetic: true`). Real data is not supported yet.
 
 ### Notebooks of a scenario
 

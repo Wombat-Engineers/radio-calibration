@@ -46,7 +46,8 @@ class Step:
 def result_paths(scenario: str) -> tuple[Path, ...]:
     """Return the results of a run of a scenario: its data, its outputs, and the configuration.
 
-    The figure and table directories come from the configuration, not from this function.
+    The outputs hold the Hydra runs of the scenario generator. The figure and table
+    directories come from the configuration, not from this function.
     """
     dirs = scenario_dirs(scenario)
     return (dirs.raw, dirs.processed, dirs.outputs, CONFIG_DIR)
@@ -210,13 +211,11 @@ def write_archive(
     return archive
 
 
-def pack_results(
-    scenario: str, started: datetime, steps: Sequence[Step], extra_paths: Sequence[Path]
-) -> Path:
+def pack_results(scenario: str, started: datetime, steps: Sequence[Step]) -> Path:
     """Write the results of a run to `lab/outputs/archives/<start time>_<scenario>.zip`.
 
     The archive has the paths of `result_paths`, the figure and the table directories of
-    the configuration, `extra_paths`, and two text files:
+    the configuration, and two text files:
 
     - `config.yaml`: the composed configuration that the notebooks read.
     - `manifest.json`: the start and end time, the status (`ok` or `failed`), the steps,
@@ -226,7 +225,6 @@ def pack_results(
         scenario: Name of the scenario.
         started: Start time of the run.
         steps: The steps from `run_steps`.
-        extra_paths: Other files or directories in the repository.
 
     Returns:
         The path of the archive.
@@ -244,7 +242,7 @@ def pack_results(
         ARCHIVE_DIR,
         f"{started.strftime('%Y%m%d-%H%M%S')}_{scenario}",
         PROJECT_ROOT,
-        [*result_paths(scenario), *output_dirs, *extra_paths],
+        [*result_paths(scenario), *output_dirs],
         {
             "config.yaml": OmegaConf.to_yaml(cfg, resolve=True),
             "manifest.json": json.dumps(manifest, indent=2),

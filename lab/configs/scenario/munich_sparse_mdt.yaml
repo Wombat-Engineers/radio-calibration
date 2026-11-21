@@ -8,3 +8,9 @@ name: munich_sparse_mdt
 
 # Numbers of train records for the fine-tuning. Assumption.
 fine_tuning_sizes: [50, 100, 200]
+
+# Division of the MDT records. `random`: each record goes to one part at random.
+# The fractions are assumptions.
+split:
+  method: random
+  fractions: [0.7, 0.1, 0.2]

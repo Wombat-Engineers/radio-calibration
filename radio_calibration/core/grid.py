@@ -7,16 +7,16 @@ import numpy as np
 
 @dataclass(frozen=True)
 class RadioMapGrid:
-    """A horizontal grid of square cells at one height.
+    """A horizontal grid of square grid cells at one height.
 
-    Row `i` and column `j` is the cell with its center at
+    Row `i` and column `j` is the grid cell with its center at
     `(x_min + (j + 0.5) * cell_size, y_min + (i + 0.5) * cell_size, z)`.
 
     Attributes:
         x_min: Smallest x of the grid, in meters.
         y_min: Smallest y of the grid, in meters.
         z: Height of the measurement plane, in meters.
-        cell_size: Length of one side of a cell, in meters.
+        cell_size: Length of one side of a grid cell, in meters.
         nx: Number of columns.
         ny: Number of rows.
 
@@ -43,14 +43,14 @@ class RadioMapGrid:
         return float(np.hypot(self.nx * self.cell_size, self.ny * self.cell_size))
 
     def centers(self) -> np.ndarray:
-        """Return the cell centers in meters, with shape `[ny, nx, 3]`."""
+        """Return the grid-cell centers in meters, with shape `[ny, nx, 3]`."""
         x = self.x_min + (np.arange(self.nx) + 0.5) * self.cell_size
         y = self.y_min + (np.arange(self.ny) + 0.5) * self.cell_size
         xx, yy = np.meshgrid(x, y)
         return np.stack([xx, yy, np.full_like(xx, self.z)], axis=-1)
 
     def cell_index(self, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Find the cell that holds each position. The function uses only x and y.
+        """Find the grid cell that holds each position. The function uses only x and y.
 
         Args:
             positions: Positions in meters, with shape `[n, 2]` or `[n, 3]`.
@@ -58,7 +58,7 @@ class RadioMapGrid:
         Returns:
             The row index, the column index, and a boolean array that is True for a
             position in the grid. Each array has shape `[n]`. The indices of a position
-            outside the grid are clipped to the nearest cell.
+            outside the grid are clipped to the nearest grid cell.
         """
         positions = np.asarray(positions, dtype=float)
         column = np.floor((positions[:, 0] - self.x_min) / self.cell_size).astype(int)

@@ -18,7 +18,8 @@ synthetic: true
 ue_height_m: 1.5
 
 # Grid for the height map and the building density. A "tile" is one square of this grid.
-# A "cell" is always a cell of a site. The radio-map cell size must be a multiple of the tile.
+# A "cell" is always a cell of a site. The grid-cell size of the radio map must be a multiple
+# of the tile.
 grid:
   tile_size_m: 5.0
   # A grid tile above this height is a building.
@@ -105,9 +106,3 @@ pretraining:
   center_shift_m: 200.0
   # The azimuths of all sectors turn by uniform(0, azimuth_shift_deg). Assumption.
   azimuth_shift_deg: 120.0
-
-# Division of the MDT records. `random`: each record goes to one part at random.
-# The fractions are assumptions.
-split:
-  method: random
-  fractions: [0.7, 0.1, 0.2]

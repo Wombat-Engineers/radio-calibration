@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-from radio_calibration.core import MapInputs, RadioMapGrid
+from radio_calibration.core import MapInputs, RadioMapGrid, path_gain_to_db
 
 FEATURE_NAMES = (
     "path_gain_db",
@@ -38,10 +38,9 @@ def sensitivity_floor_db(min_rsrp_dbm: float, power_rs_dbm: Sequence[float]) -> 
     return float(min_rsrp_dbm - np.max(power_rs_dbm) - FLOOR_MARGIN_DB)
 
 
-def _path_gain_db(path_gain: np.ndarray, floor_db: float) -> np.ndarray:
-    """Return the path gain in dB, with `floor_db` where it is 0 or below the floor."""
-    with np.errstate(divide="ignore"):
-        return np.maximum(np.where(path_gain > 0, 10.0 * np.log10(path_gain), floor_db), floor_db)
+def floored_path_gain_db(path_gain: np.ndarray, floor_db: float) -> np.ndarray:
+    """Change a linear path gain to dB, with `floor_db` where it is 0 or below the floor."""
+    return np.fmax(path_gain_to_db(path_gain), floor_db)
 
 
 @dataclass(frozen=True)
@@ -89,7 +88,7 @@ class Normalization:
         if not inputs:
             raise ValueError("The normalization needs a minimum of one input map.")
         path_gain_db = np.concatenate(
-            [_path_gain_db(m.path_gain, floor_db).ravel() for m in inputs]
+            [floored_path_gain_db(m.path_gain, floor_db).ravel() for m in inputs]
         )
         heights = np.concatenate([m.max_height.ravel() for m in inputs])
         return cls(
@@ -134,13 +133,12 @@ def pad(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
 def base_path_gain_db(inputs: MapInputs, floor_db: float) -> np.ndarray:
     """Return the simulated path gain in dB, with `floor_db` where it is 0 or below the floor.
 
-    The U-Net adds its output to this map. The same map is the path gain input channel
-    before the normalization.
+    This map is the path gain input channel before the normalization.
 
     Returns:
         The path gain in dB, with shape `[n_cells, ny, nx]`.
     """
-    return _path_gain_db(inputs.path_gain, floor_db)
+    return floored_path_gain_db(inputs.path_gain, floor_db)
 
 
 def feature_tensor(

@@ -12,7 +12,6 @@ from radio_calibration.api import RadioMapModel
 from radio_calibration.calibration import (
     HISTORY_COLUMNS,
     Normalization,
-    base_path_gain_db,
     make_network,
 )
 from tests.test_calibration import CALIBRATION, CPU, FLOOR_DB, GRID, INPUTS, LABELS, records
@@ -99,7 +98,7 @@ def test_save_load_round_trip(pretrained, tmp_path):
     np.testing.assert_allclose(
         loaded.predict_path_gain_db(INPUTS[1]), model.predict_path_gain_db(INPUTS[1]), rtol=1e-6
     )
-    assert loaded.channels == model.channels and loaded.residual == model.residual
+    assert loaded.channels == model.channels
 
 
 def test_save_bad_suffix(pretrained, tmp_path):
@@ -125,26 +124,15 @@ def test_integration_flow(tmp_path):
     assert predicted.shape == rsrp.shape
 
 
-def test_untrained_model_default_is_direct():
+def test_untrained_model_gives_mean():
     torch.manual_seed(0)
     normalization = Normalization.fit(INPUTS, FLOOR_DB)
     model = RadioMapModel(make_network(6, CALIBRATION), normalization, CPU)
 
-    # A new direct model gives the mean input path gain everywhere.
-    assert model.residual is False
+    # A new model gives the mean input path gain everywhere.
     np.testing.assert_allclose(
         model.predict_path_gain_db(INPUTS[0]), normalization.path_gain_mean, rtol=1e-5
     )
-
-
-def test_untrained_residual_model_equals_ray_tracing():
-    torch.manual_seed(0)
-    model = RadioMapModel(
-        make_network(6, CALIBRATION), Normalization.fit(INPUTS, FLOOR_DB), CPU, residual=True
-    )
-    predicted = model.predict_path_gain_db(INPUTS[0])
-
-    np.testing.assert_allclose(predicted, base_path_gain_db(INPUTS[0], FLOOR_DB), rtol=1e-5)
 
 
 def test_api_exports():

@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(error))
     started = datetime.now()
     steps = run_steps([notebook_command(path) for path in notebooks])
-    archive = pack_results(scenario, started, steps, extra_paths=[])
+    archive = pack_results(scenario, started, steps)
     print(f"\nArchive: {archive}")
     return 0 if all(step.returncode == 0 for step in steps) else 1
 

@@ -4,7 +4,6 @@ import dataclasses
 import logging
 import math
 import time
-from collections.abc import Sequence
 from pathlib import Path
 
 import hydra
@@ -182,7 +181,7 @@ def generate(cfg: DictConfig, output_dir: Path) -> None:
         scene_cells = [cell for layout in scene_layouts for cell in layout]
         label = compute_path_gain_map(changed, scene_cells, grid, simulation)
         calls += _solver_calls(len(scene_cells), batch)
-        labels += _split(label, [len(layout) for layout in scene_layouts])
+        labels += np.split(label, np.cumsum([len(layout) for layout in scene_layouts])[:-1])
         scene_indices += [scene_index] * len(scene_layouts)
         log.info("Pretraining scene %d: %.1f s", scene_index, time.perf_counter() - step)
 
@@ -196,10 +195,6 @@ def generate(cfg: DictConfig, output_dir: Path) -> None:
         calls,
         time.perf_counter() - started,
     )
-
-
-def _split(array: np.ndarray, sizes: Sequence[int]) -> list[np.ndarray]:
-    return np.split(array, np.cumsum(sizes)[:-1])
 
 
 @hydra.main(config_path=str(CONFIG_DIR), config_name="config", version_base=None)

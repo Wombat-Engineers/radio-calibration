@@ -18,7 +18,6 @@ from radio_calibration.calibration import (
     UNet,
     fine_tune,
     load_model,
-    log_error,
     predict_maps_db,
     pretrain,
     save_model,
@@ -34,7 +33,12 @@ from radio_calibration.core import (
     check_positions,
     rsrp_from_map,
 )
-from radio_calibration.evaluation import error_statistics, grouped_statistics, map_statistics
+from radio_calibration.evaluation import (
+    error_statistics,
+    grouped_statistics,
+    log_error,
+    map_statistics,
+)
 from radio_calibration.simulation import compute_map_inputs, load_rt_scene
 
 __all__ = [
@@ -66,8 +70,6 @@ class RadioMapModel:
         normalization: The statistics of the pretraining inputs.
         device: The PyTorch device of the network.
         channels: The input channels of the network.
-        residual: If False (the default), the network output is the normalized path gain in
-            dB. If True, the network output is added to the simulated path gain in dB.
     """
 
     def __init__(
@@ -76,13 +78,11 @@ class RadioMapModel:
         normalization: Normalization,
         device: torch.device,
         channels: Sequence[str] = FEATURE_NAMES,
-        residual: bool = False,
     ) -> None:
         self.network = network.to(device)
         self.normalization = normalization
         self.device = device
         self.channels = tuple(channels)
-        self.residual = residual
 
     @classmethod
     def pretrain(
@@ -94,7 +94,6 @@ class RadioMapModel:
         device: torch.device,
         floor_db: float,
         channels: Sequence[str] = FEATURE_NAMES,
-        residual: bool = False,
     ) -> tuple["RadioMapModel", pd.DataFrame]:
         """Train a new model on simulated scene variants.
 
@@ -107,7 +106,6 @@ class RadioMapModel:
             floor_db: The floor of the path gain in dB. Use `sensitivity_floor_db` with the
                 smallest RSRP that a UE reports and the powers of the cells.
             channels: The input channels.
-            residual: The output type.
 
         Returns:
             The model and the history of the pretraining.
@@ -115,19 +113,19 @@ class RadioMapModel:
         Raises:
             ValueError: As for `radio_calibration.calibration.pretrain`.
         """
-        result = pretrain(inputs, labels, calibration, seed, device, floor_db, channels, residual)
-        model = cls(result.network, result.normalization, device, channels, residual)
+        result = pretrain(inputs, labels, calibration, seed, device, floor_db, channels)
+        model = cls(result.network, result.normalization, device, channels)
         return model, result.history
 
     @classmethod
     def load(cls, path: Path, device: torch.device) -> "RadioMapModel":
         """Read a model from a `.pt` file of `save`."""
-        network, normalization, channels, residual = load_model(path, device)
-        return cls(network, normalization, device, channels, residual)
+        network, normalization, channels = load_model(path, device)
+        return cls(network, normalization, device, channels)
 
     def save(self, path: Path) -> None:
         """Write the model to a `.pt` file."""
-        save_model(path, self.network, self.normalization, self.channels, self.residual)
+        save_model(path, self.network, self.normalization, self.channels)
 
     def fine_tune(
         self,
@@ -173,7 +171,6 @@ class RadioMapModel:
             seed,
             self.device,
             self.channels,
-            self.residual,
         )
 
     def predict_path_gain_db(self, inputs: MapInputs) -> np.ndarray:
@@ -182,9 +179,7 @@ class RadioMapModel:
         Returns:
             The path gain in dB, with shape `[n_cells, ny, nx]`.
         """
-        return predict_maps_db(
-            self.network, self.normalization, inputs, self.device, self.channels, self.residual
-        )
+        return predict_maps_db(self.network, self.normalization, inputs, self.device, self.channels)
 
     def predict_rsrp_dbm(
         self, inputs: MapInputs, positions: np.ndarray, cells: Sequence[Cell]

@@ -4,8 +4,9 @@ from radio_calibration.evaluation.baselines import SpmModel, fit_offset, spm_inp
 from radio_calibration.evaluation.metrics import (
     error_statistics,
     grouped_statistics,
+    log_error,
     map_statistics,
-    nearest_distance,
+    smape,
 )
 from radio_calibration.evaluation.resources import ResourceMonitor
 
@@ -15,7 +16,8 @@ __all__ = [
     "error_statistics",
     "fit_offset",
     "grouped_statistics",
+    "log_error",
     "map_statistics",
-    "nearest_distance",
+    "smape",
     "spm_inputs",
 ]

@@ -18,8 +18,8 @@ import torch
 from radio_calibration.calibration.features import (
     FEATURE_NAMES,
     Normalization,
-    base_path_gain_db,
     feature_tensor,
+    floored_path_gain_db,
     pad,
     padded_shape,
 )
@@ -49,30 +49,29 @@ def make_network(num_channels: int, calibration: CalibrationSettings) -> UNet:
     return UNet(num_channels, calibration.base_channels, calibration.depth, calibration.groups)
 
 
-def predict_db(
-    network: UNet,
-    features: torch.Tensor,
-    base_db: torch.Tensor,
-    normalization: Normalization,
-    residual: bool,
-) -> torch.Tensor:
+def validation_count(num_maps: int, fraction: float) -> int:
+    """Return the number of maps that the pretraining keeps for validation.
+
+    The number is `fraction * num_maps`, rounded, with a minimum of 1 validation map and a
+    minimum of 1 train map.
+    """
+    return min(max(1, round(fraction * num_maps)), num_maps - 1)
+
+
+def predict_db(network: UNet, features: torch.Tensor, normalization: Normalization) -> torch.Tensor:
     """Calculate the predicted path gain in dB.
+
+    The network output is the normalized path gain in dB.
 
     Args:
         network: The network.
         features: Input channels with shape `[batch, channels, rows, columns]`.
-        base_db: Simulated path gain in dB with the floor, with shape `[batch, rows, columns]`.
         normalization: The statistics of the pretraining inputs.
-        residual: If True, the prediction is `base_db` plus the network output. If False,
-            the network output is the normalized path gain in dB.
 
     Returns:
         The path gain in dB, with shape `[batch, rows, columns]`.
     """
-    output = network(features)
-    if residual:
-        return base_db + output
-    return normalization.path_gain_mean + normalization.path_gain_std * output
+    return normalization.path_gain_mean + normalization.path_gain_std * network(features)
 
 
 def _tensor(array: np.ndarray, device: torch.device) -> torch.Tensor:
@@ -146,7 +145,6 @@ def pretrain(
     device: torch.device,
     floor_db: float,
     channels: Sequence[str] = FEATURE_NAMES,
-    residual: bool = False,
 ) -> PretrainResult:
     """Train a new U-Net to change simulated path gain maps into the target maps.
 
@@ -165,7 +163,6 @@ def pretrain(
         device: The PyTorch device.
         floor_db: The floor of the path gain in dB, from `sensitivity_floor_db`.
         channels: The input channels, as for `feature_tensor`.
-        residual: The output type, as for `predict_db`.
 
     Returns:
         The result.
@@ -186,19 +183,15 @@ def pretrain(
             )
     normalization = Normalization.fit(inputs, floor_db)
     multiple = 2**calibration.depth
-    parts = {"features": [], "base": [], "label": [], "mask": []}
+    parts = {"features": [], "label": [], "mask": []}
     for map_inputs, label in zip(inputs, labels, strict=True):
         shape = padded_shape(map_inputs.grid, multiple)
         parts["features"].append(feature_tensor(map_inputs, normalization, multiple, channels))
-        parts["base"].append(pad(base_path_gain_db(map_inputs, normalization.floor_db), shape))
         label = np.asarray(label, dtype=float)
         # A grid cell with no target gets the floor here. The mask removes it from the loss.
-        label_db = np.maximum(_finite_db(label), floor_db)
-        parts["label"].append(pad(label_db, shape))
+        parts["label"].append(pad(floored_path_gain_db(label, floor_db), shape))
         parts["mask"].append(pad((label > 0).astype(float), shape))
-    num_validation = min(
-        max(1, round(calibration.validation_fraction * len(inputs))), len(inputs) - 1
-    )
+    num_validation = validation_count(len(inputs), calibration.validation_fraction)
     order = np.random.default_rng(seed).permutation(len(inputs))
     split = {"validation": order[:num_validation], "train": order[num_validation:]}
     data = {
@@ -212,9 +205,7 @@ def pretrain(
     network = make_network(len(channels), calibration).to(device)
 
     def loss_of(part: dict[str, torch.Tensor], indices) -> torch.Tensor:
-        predicted = predict_db(
-            network, part["features"][indices], part["base"][indices], normalization, residual
-        )
+        predicted = predict_db(network, part["features"][indices], normalization)
         error = torch.abs(part["label"][indices] - predicted)
         mask = part["mask"][indices]
         return (error * mask).sum() / mask.sum().clamp(min=1.0)
@@ -231,12 +222,6 @@ def pretrain(
         device,
     )
     return PretrainResult(network, normalization, history)
-
-
-def _finite_db(path_gain: np.ndarray) -> np.ndarray:
-    """Return the path gain in dB, with -inf where it is 0."""
-    with np.errstate(divide="ignore"):
-        return 10.0 * np.log10(path_gain)
 
 
 def _pairs(map_inputs: MapInputs, positions: np.ndarray, rsrp_dbm: np.ndarray) -> np.ndarray:
@@ -258,7 +243,6 @@ def fine_tune(
     seed: int,
     device: torch.device,
     channels: Sequence[str] = FEATURE_NAMES,
-    residual: bool = False,
 ) -> pd.DataFrame:
     """Change all parameters of the network to agree with the measured RSRP.
 
@@ -279,7 +263,6 @@ def fine_tune(
         seed: Seed of the batch order.
         device: The PyTorch device.
         channels: The input channels of the network.
-        residual: The output type of the network.
 
     Returns:
         One row for each epoch, with the columns `HISTORY_COLUMNS`.
@@ -292,13 +275,11 @@ def fine_tune(
     if len(train_pairs) == 0:
         raise ValueError("The fine-tuning needs a minimum of one received pair in the grid.")
     multiple = 2**calibration.depth
-    shape = padded_shape(map_inputs.grid, multiple)
     features = _tensor(feature_tensor(map_inputs, normalization, multiple, channels), device)
-    base = _tensor(pad(base_path_gain_db(map_inputs, normalization.floor_db), shape), device)
     power = _tensor(power_rs_dbm, device)
 
     def loss_of(pairs: torch.Tensor) -> torch.Tensor:
-        predicted = predict_db(network, features, base, normalization, residual)
+        predicted = predict_db(network, features, normalization)
         cell, row, column = (pairs[:, axis].long() for axis in range(3))
         return torch.abs(pairs[:, 3] - (power[cell] + predicted[cell, row, column])).mean()
 
@@ -320,19 +301,17 @@ def predict_maps_db(
     map_inputs: MapInputs,
     device: torch.device,
     channels: Sequence[str] = FEATURE_NAMES,
-    residual: bool = False,
 ) -> np.ndarray:
     """Calculate the corrected path gain map of each cell, in dB.
 
     Returns:
         The path gain in dB, with shape `[n_cells, ny, nx]`.
     """
-    multiple = 2**network.depth
-    shape = padded_shape(map_inputs.grid, multiple)
-    features = _tensor(feature_tensor(map_inputs, normalization, multiple, channels), device)
-    base = _tensor(pad(base_path_gain_db(map_inputs, normalization.floor_db), shape), device)
+    features = _tensor(
+        feature_tensor(map_inputs, normalization, 2**network.depth, channels), device
+    )
     network.eval()
     with torch.no_grad():
-        predicted = predict_db(network, features, base, normalization, residual)
+        predicted = predict_db(network, features, normalization)
     grid = map_inputs.grid
     return predicted[:, : grid.ny, : grid.nx].cpu().numpy().astype(float)

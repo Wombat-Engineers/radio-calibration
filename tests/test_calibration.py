@@ -10,21 +10,19 @@ from radio_calibration.calibration import (
     HISTORY_COLUMNS,
     Normalization,
     UNet,
-    absolute_log_error,
     base_path_gain_db,
-    dbm_to_mw,
     feature_tensor,
     fine_tune,
     load_model,
-    log_error,
     make_network,
     predict_db,
     predict_maps_db,
     pretrain,
     save_model,
     sensitivity_floor_db,
-    smape,
+    validation_count,
 )
+from radio_calibration.calibration.features import floored_path_gain_db
 from radio_calibration.core import CalibrationSettings, MapInputs, RadioMapGrid
 from tests.test_core import CALIBRATION_MAPPING
 
@@ -51,48 +49,8 @@ def make_inputs(seed: int, num_cells: int = 2) -> MapInputs:
 
 
 INPUTS = [make_inputs(seed) for seed in range(5)]
-# The labels are the inputs plus 3 dB, thus a residual network can learn them.
+# The labels are the inputs plus 3 dB.
 LABELS = [inputs.path_gain * 2.0 for inputs in INPUTS]
-
-
-# --- loss ---
-
-
-def test_dbm_to_mw():
-    np.testing.assert_allclose(dbm_to_mw(np.array([0.0, -30.0, np.nan])), [1.0, 1e-3, np.nan])
-
-
-def test_smape_equal():
-    assert smape(np.array([2.0]), np.array([2.0]), 0.0).tolist() == [0.0]
-
-
-def test_smape_value():
-    # |1 - 3| / (1 + 3) = 0.5
-    assert smape(np.array([1.0]), np.array([3.0]), 0.0).tolist() == [0.5]
-
-
-def test_smape_zero_label_epsilon():
-    assert smape(np.array([0.0]), np.array([0.0]), 1e-30).tolist() == [0.0]
-
-
-def test_smape_numpy_equals_torch():
-    measured, simulated = np.array([1e-10, 3e-12]), np.array([2e-10, 1e-12])
-
-    expected = smape(measured, simulated, 1e-30)
-    actual = smape(torch.tensor(measured), torch.tensor(simulated), 1e-30).numpy()
-
-    np.testing.assert_allclose(actual, expected)
-
-
-def test_log_error_sign():
-    assert log_error(np.array([-80.0]), np.array([-90.0])).tolist() == [10.0]
-
-
-def test_absolute_log_error_nan():
-    error = absolute_log_error(np.array([-80.0, np.nan]), np.array([-90.0, -70.0]))
-
-    assert error[0] == 10.0
-    assert np.isnan(error[1])
 
 
 # --- features ---
@@ -128,6 +86,12 @@ def test_normalization_state_missing_key():
 
     with pytest.raises(ValueError, match="floor_db"):
         Normalization.from_state(state)
+
+
+def test_floored_path_gain_db():
+    values = floored_path_gain_db(np.array([0.0, 1e-20, 1e-5]), floor_db=-150.0)
+
+    np.testing.assert_allclose(values, [-150.0, -150.0, -50.0])
 
 
 def test_base_path_gain_db():
@@ -234,28 +198,24 @@ def run_pretrain(**changes):
     return pretrain(INPUTS, LABELS, CALIBRATION, seed=0, device=CPU, floor_db=FLOOR_DB, **changes)
 
 
-def test_predict_db_untrained_equals_base():
-    normalization = Normalization.fit(INPUTS, FLOOR_DB)
-    network = make_network(len(FEATURE_NAMES), CALIBRATION)
-    features = torch.as_tensor(feature_tensor(INPUTS[0], normalization, 4))
-    base = torch.randn(2, 8, 8)
-
-    predicted = predict_db(network, features, base, normalization, residual=True)
-
-    torch.testing.assert_close(predicted, base)
-
-
-def test_predict_db_direct():
+def test_predict_db_untrained_gives_mean():
     normalization = Normalization.fit(INPUTS, FLOOR_DB)
     network = make_network(len(FEATURE_NAMES), CALIBRATION)
     features = torch.as_tensor(feature_tensor(INPUTS[0], normalization, 4))
 
-    predicted = predict_db(network, features, torch.randn(2, 8, 8), normalization, residual=False)
+    predicted = predict_db(network, features, normalization)
 
     # A new network gives 0, thus the direct output is the mean path gain.
     assert torch.allclose(
         predicted, torch.tensor(normalization.path_gain_mean, dtype=torch.float32)
     )
+
+
+@pytest.mark.parametrize(
+    ("num_maps", "fraction", "expected"), [(16, 0.2, 3), (5, 0.01, 1), (2, 0.8, 1)]
+)
+def test_validation_count(num_maps, fraction, expected):
+    assert validation_count(num_maps, fraction) == expected
 
 
 def test_pretrain_history_columns():
@@ -397,12 +357,11 @@ def test_save_load_round_trip(tmp_path):
     path = tmp_path / "model.pt"
     channels = FEATURE_NAMES[:-1]
 
-    save_model(path, result.network, result.normalization, channels, residual=False)
-    network, normalization, loaded_channels, residual = load_model(path, CPU)
+    save_model(path, result.network, result.normalization, channels)
+    network, normalization, loaded_channels = load_model(path, CPU)
 
     assert normalization == result.normalization
     assert loaded_channels == channels
-    assert residual is False
     for name, value in result.network.state_dict().items():
         torch.testing.assert_close(network.state_dict()[name], value)
 
@@ -411,9 +370,7 @@ def test_save_bad_suffix(tmp_path):
     result = run_pretrain()
 
     with pytest.raises(ValueError, match=".pt"):
-        save_model(
-            tmp_path / "model.npz", result.network, result.normalization, FEATURE_NAMES, True
-        )
+        save_model(tmp_path / "model.npz", result.network, result.normalization, FEATURE_NAMES)
 
 
 def test_load_rejects_missing_key(tmp_path):

@@ -10,9 +10,39 @@ from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
-from scipy.spatial import KDTree
 
-from radio_calibration.calibration.loss import log_error, smape
+
+def log_error(measured_dbm: np.ndarray, simulated_dbm: np.ndarray) -> np.ndarray:
+    """Calculate the signed error between measured and simulated powers in decibels.
+
+    A positive error shows that the simulated power is less than the measured power.
+
+    Args:
+        measured_dbm: Measured powers in dBm.
+        simulated_dbm: Simulated powers in dBm, with the same shape.
+
+    Returns:
+        The error in dB, with the shape of the inputs. A value is NaN if the measured
+        power or the simulated power is NaN.
+    """
+    return np.asarray(measured_dbm) - np.asarray(simulated_dbm)
+
+
+def smape(measured: np.ndarray, simulated: np.ndarray, epsilon: float) -> np.ndarray:
+    """Calculate the symmetric absolute percentage error of each pair of linear values.
+
+    The error is `|m - s| / (m + s + epsilon)`. It is from 0 to 1.
+
+    Args:
+        measured: Measured linear values, not negative.
+        simulated: Simulated linear values, not negative, with the same shape.
+        epsilon: A value of 0 or more. A value more than 0 gives an error of 0, not 0/0,
+            when the two values are 0.
+
+    Returns:
+        One error for each pair, with the shape of the inputs.
+    """
+    return np.abs(measured - simulated) / (measured + simulated + epsilon)
 
 
 def _quantile_name(quantile: float) -> str:
@@ -150,29 +180,6 @@ def grouped_statistics(
         for group, members in pairs.groupby("group", observed=True, sort=True)
     }
     return pd.DataFrame.from_dict(rows, orient="index")
-
-
-def nearest_distance(points: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """Calculate the horizontal distance from each point to the nearest reference point.
-
-    The function uses only the `x` and `y` coordinates. A test record near a train record
-    can have a small error only because the two records are near (arXiv:2411.17752).
-
-    Args:
-        points: Positions in meters, with shape `[n, 2]` or `[n, 3]`.
-        reference: Reference positions in meters, with shape `[m, 2]` or `[m, 3]`.
-
-    Returns:
-        The distance in meters, with shape `[n]`.
-
-    Raises:
-        ValueError: If `reference` has no row.
-    """
-    reference = np.asarray(reference, dtype=float)
-    if len(reference) == 0:
-        raise ValueError("The reference must have a minimum of one position.")
-    distance, _ = KDTree(reference[:, :2]).query(np.asarray(points, dtype=float)[:, :2])
-    return np.asarray(distance, dtype=float)
 
 
 def map_statistics(

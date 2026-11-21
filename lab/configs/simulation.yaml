@@ -5,7 +5,8 @@
 radio:
   frequency_hz: 2.6e9
 
-# Length of one side of a radio-map cell. It must be a multiple of scenario.grid.tile_size_m.
+# Length of one side of a grid cell of the radio map. It must be a multiple of
+# scenario.grid.tile_size_m.
 radio_map_cell_size_m: 20.0
 
 # Maximum number of transmitters in one call of the radio-map solver. Measured on the Munich
@@ -18,7 +19,7 @@ radio_map_tx_batch_size: 153
 
 # Arguments of a call of the Sionna RT RadioMapSolver. The code gives center, orientation,
 # size, and cell_size from the grid. Each other key goes to the call with no change.
-# Measured on the Munich scene with one cell: no ray reaches 72% of the radio-map cells with
+# Measured on the Munich scene with one cell: no ray reaches 72% of the grid cells with
 # samples_per_tx 1000000, and 56% with 10000000. About 30% of the cells are in buildings.
 radio_map:
   samples_per_tx: 1000000         # Recommended: 10000000

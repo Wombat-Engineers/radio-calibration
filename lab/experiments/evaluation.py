@@ -74,8 +74,7 @@ def baseline_maps(
     """Return the path gain maps in dB of the three baselines.
 
     - Sionna RT on the original scene. A grid cell with no ray or a path gain below the floor
-      gets the floor, as in the input of the U-Net. Thus this map is the residual U-Net with
-      no training.
+      gets the floor, as in the input of the U-Net.
     - Sionna RT plus one offset that the train records give.
     - The SPM model with coefficients from the train records.
 
