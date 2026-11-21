@@ -1,51 +1,70 @@
-"""File format of a calibration result: the neural material with its power scale."""
+"""File format of a trained U-Net."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
-import numpy as np
+import torch
 
-from radio_calibration.simulation import NeuralRadioMaterial
+from radio_calibration.calibration.features import Normalization
+from radio_calibration.calibration.unet import UNet
+
+_SUFFIX = ".pt"
+_KEYS = ("state_dict", "architecture", "normalization", "channels", "residual")
+_ARCHITECTURE = ("in_channels", "base_channels", "depth", "groups")
 
 
-def save_calibration(path: Path, material: NeuralRadioMaterial) -> None:
-    """Write the calibrated material to one NumPy `.npz` file.
+def save_model(
+    path: Path,
+    network: UNet,
+    normalization: Normalization,
+    channels: Sequence[str],
+    residual: bool,
+) -> None:
+    """Write the network, its normalization, and its input format to a `.pt` file.
 
-    The file has the result of `NeuralRadioMaterial.state`. Thus it has the power scale:
-    the weights are correct only with their scale.
-
-    Args:
-        path: Path of the file. Its suffix must be `.npz`.
-        material: The calibrated material.
+    The file has only tensors, numbers, strings, lists, and dictionaries. Thus
+    `torch.load(..., weights_only=True)` can read it.
 
     Raises:
-        ValueError: If the suffix of `path` is not `.npz`, or if the material has no scale.
+        ValueError: If the suffix of `path` is not `.pt`.
     """
-    if path.suffix != ".npz":
-        raise ValueError(f"The file name must have the suffix .npz, but it is '{path.name}'.")
-    if material.scale is None:
-        raise ValueError("The material has no scale. Calibrate it before you save it.")
-    np.savez(path, **material.state())
+    if path.suffix != _SUFFIX:
+        raise ValueError(f"The model file must have the suffix {_SUFFIX}, but it is '{path}'.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "state_dict": {name: value.cpu() for name, value in network.state_dict().items()},
+            "architecture": {name: int(getattr(network, name)) for name in _ARCHITECTURE},
+            "normalization": normalization.state(),
+            "channels": list(channels),
+            "residual": bool(residual),
+        },
+        path,
+    )
 
 
-def load_calibration(path: Path, name: str) -> NeuralRadioMaterial:
-    """Read a file that `save_calibration` wrote.
+def load_model(
+    path: Path, device: torch.device
+) -> tuple[UNet, Normalization, tuple[str, ...], bool]:
+    """Read a file of `save_model`.
 
-    Args:
-        path: Path of the file.
-        name: Name of the material.
+    The function reads with `weights_only=True`, thus a file cannot run code.
 
     Returns:
-        The material with its power scale.
+        The network on `device` in evaluation mode, its normalization, its input channels,
+        and its output type (True for a residual output).
 
     Raises:
-        ValueError: If the file has an object array, if a key is missing, if the file has
-            no scale, if the number of weights does not agree with the network structure,
-            or if the scale is not a finite number more than 0.
+        ValueError: If the suffix is not `.pt`, or if the file does not have a key.
     """
-    # allow_pickle=False: a file from an unknown source must not run code.
-    with np.load(path, allow_pickle=False) as data:
-        state = {key: data[key] for key in data.files}
-    material = NeuralRadioMaterial.from_state(state, name)
-    if material.scale is None:
-        raise ValueError("The file has no power scale.")
-    return material
+    if path.suffix != _SUFFIX:
+        raise ValueError(f"The model file must have the suffix {_SUFFIX}, but it is '{path}'.")
+    content = torch.load(path, map_location=device, weights_only=True)
+    missing = [key for key in _KEYS if key not in content]
+    if missing:
+        raise ValueError(f"The model file '{path}' does not have the keys {missing}.")
+    network = UNet(**{name: content["architecture"][name] for name in _ARCHITECTURE})
+    network.load_state_dict(content["state_dict"])
+    network.to(device).eval()
+    normalization = Normalization.from_state(content["normalization"])
+    return network, normalization, tuple(content["channels"]), bool(content["residual"])

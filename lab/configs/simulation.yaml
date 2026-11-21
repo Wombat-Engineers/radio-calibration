@@ -1,49 +1,34 @@
-# Configuration of Sionna RT: the scene, the radio parameters, the UE antenna, and the solver.
+# Configuration of Sionna RT: the radio parameters and the radio-map solver.
 # lab/configs/config.yaml loads this file into its key `simulation`.
-
-scene:
-  # A scene that Sionna RT supplies, or a file <name>.xml in lab/data/external/scenes.
-  name: munich
+# The scene is a key of the scenario (lab/configs/scenario/).
 
 radio:
   frequency_hz: 2.6e9
-  # Sets scene.bandwidth to one resource element. It does not change the RSRP.
-  subcarrier_spacing_hz: 30.0e3
 
-# UE antenna: one vertical dipole. Sionna RT planar array; spacings in wavelengths.
-receiver:
-  num_rows: 1
-  num_cols: 1
-  vertical_spacing: 0.5
-  horizontal_spacing: 0.5
-  pattern: "dipole"
-  polarization: "V"
+# Length of one side of a radio-map cell. It must be a multiple of scenario.grid.tile_size_m.
+radio_map_cell_size_m: 20.0
 
-# Arguments of the Sionna RT PathSolver.
-# The values in use are small: they let the calibration run on a GPU with 4 GB of memory.
-# A comment "Recommended" gives the value for a GPU with more memory.
-solver:
+# Maximum number of transmitters in one call of the radio-map solver. Measured on the Munich
+# scene with the values in use on the 4 GB development GPU (RTX 3050 Ti), 2026-11-21:
+# 9 transmitters 307 MiB and 8.5 s; 36 transmitters 307 MiB and 6.9 s; 153 transmitters
+# 339 MiB and 19.1 s. With samples_per_tx 10000000: 36 transmitters 341 MiB and 11.6 s.
+# 153 is the largest value of the test. The largest call of the scenario generator has 153
+# transmitters (9 cells and 16 layouts of 9 cells).
+radio_map_tx_batch_size: 153
+
+# Arguments of a call of the Sionna RT RadioMapSolver. The code gives center, orientation,
+# size, and cell_size from the grid. Each other key goes to the call with no change.
+# Measured on the Munich scene with one cell: no ray reaches 72% of the radio-map cells with
+# samples_per_tx 1000000, and 56% with 10000000. About 30% of the cells are in buildings.
+radio_map:
+  samples_per_tx: 1000000         # Recommended: 10000000
   max_depth: 5                    # Recommended: 8
-  samples_per_src: 100000         # Recommended: 1000000
-  # Sionna RT allocates the path buffer for this number of paths before it traces the rays.
-  max_num_paths_per_src: 50000    # Recommended: 1000000 (the default)
-  synthetic_array: true           # default
   los: true                       # default
   specular_reflection: true       # default
-  # The calibration learns the scattering coefficient. It needs the diffuse reflections.
   diffuse_reflection: true
-  refraction: true
+  refraction: true                # default
   diffraction: true
   edge_diffraction: false         # default
   diffraction_lit_region: true    # default
   # The root seed of lab/configs/config.yaml.
   seed: ${seed}
-
-# Argument of the PathSolver constructor (Sionna RT).
-# false avoids the invalid NaN path that the deterministic solver of Sionna RT 2.2.0 can add
-# with specular and diffuse reflections on, and that stops the calibration, but the RSRP is
-# then not bit-equal between runs.
-deterministic: false
-
-# Number of UE positions in one PathSolver call. Assumption.
-rx_batch_size: 10                 # Recommended: 100

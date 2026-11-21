@@ -48,7 +48,7 @@ torch = [
 
 [tool.ruff]
 line-length = 100
-# lab/ holds the top-level modules scenario, utils, preprocessing, and analysis.
+# lab/ holds the top-level modules scenario, utils, preprocessing, and experiments.
 src = [".", "lab"]
 
 [tool.ruff.lint]

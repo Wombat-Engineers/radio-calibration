@@ -68,59 +68,64 @@ tasks:
       - uv run pytest {{.CLI_ARGS}}
 
   scenario:
-    desc: Generate the cells and the MDT records in lab/data/raw. Needs an NVIDIA GPU.
+    desc: Generate the data of a scenario in lab/data/<scenario>/raw. Needs an NVIDIA GPU.
     summary: |
-      Read lab/configs/config.yaml, then write cells.csv and mdt.csv to lab/data/raw. The task replaces
-      the files from the last run. Hydra writes the configuration and the log of the run to
-      lab/outputs/scenario/<date>/<time>.
-      Give Hydra overrides after "--" to change a value of the configuration.
+      Read lab/configs/config.yaml, then write cells.csv, mdt.csv, and maps.npz to
+      lab/data/<scenario>/raw. The task replaces the files from the last run. Hydra writes the
+      configuration and the log of the run to lab/outputs/<scenario>/scenario/<date>/<time>.
+      Give Hydra overrides after "--". The default scenario is munich_map_errors.
 
       Examples:
         task scenario
+        task scenario -- scenario=munich_new_site
         task scenario -- scenario.traffic.records_per_day=200
-        task scenario -- seed=1 scenario.measurement.gnss_std_m=10
-        task scenario -- simulation.solver.max_depth=5
+        task scenario -- seed=1 simulation.radio_map.max_depth=4
     cmds:
       - uv run python -m scenario {{.CLI_ARGS}}
 
   notebook:
     desc: Run a notebook from the first cell to the last cell. Needs an NVIDIA GPU.
     summary: |
-      Run all cells of a notebook and write a copy with the outputs to lab/outputs/notebooks.
-      The task does not change the notebook in lab/notebooks/. It stops at the first cell that fails.
-      Give the path of a notebook after "--". The default is lab/notebooks/00_scenario.ipynb,
-      which needs the files from "task scenario".
+      Run all cells of a notebook of lab/notebooks/<scenario>/ and write a copy with the outputs
+      to lab/outputs/<scenario>/notebooks. The task does not change the notebook. It stops at the
+      first cell that fails. Give the path of a notebook after "--". The default is
+      lab/notebooks/munich_map_errors/00_scenario.ipynb, which needs the files from "task scenario".
 
       Examples:
         task notebook
-        task notebook -- lab/notebooks/01_eda.ipynb
+        task notebook -- lab/notebooks/munich_new_site/05_evaluation.ipynb
+    vars:
+      NOTEBOOK: '{{.CLI_ARGS | default "lab/notebooks/munich_map_errors/00_scenario.ipynb"}}'
     cmds:
-      - uv run jupyter nbconvert --execute --to notebook --output-dir lab/outputs/notebooks {{.CLI_ARGS | default "lab/notebooks/00_scenario.ipynb"}}
+      - uv run jupyter nbconvert --execute --to notebook --output-dir lab/outputs/{{base (dir .NOTEBOOK)}}/notebooks {{.NOTEBOOK}}
 
   pipeline:
-    desc: Run the scenario generator and all notebooks, then pack the results. Needs an NVIDIA GPU.
+    desc: Run the generator and all notebooks of one scenario, then pack the results. Needs an NVIDIA GPU.
     summary: |
-      Run "python -m scenario", then each notebook of lab/notebooks/ in the order of the names.
-      The task uses the configuration in lab/configs/. Change the YAML files before the run to use
-      other values. The task stops at the first step that fails. It always writes
-      lab/outputs/archives/<start time>.zip with the data, the results, the configuration, and
-      manifest.json (status, steps, versions, GPU).
+      Run "python -m scenario scenario=<name>", then each notebook of lab/notebooks/<name>/ in the
+      order of the names. The task uses the configuration in lab/configs/. Change the YAML files
+      before the run to use other values. The task stops at the first step that fails. It always
+      writes lab/outputs/archives/<start time>_<name>.zip with the data, the results, the
+      configuration, and manifest.json (status, steps, versions, GPU).
 
-      Example:
+      Examples:
         task pipeline
+        task pipeline -- --scenario munich_ablation
     cmds:
-      - uv run python lab/scripts/run_pipeline.py
+      - uv run python lab/scripts/run_pipeline.py {{.CLI_ARGS}}
 
   notebooks:
     desc: Run notebooks on the data that exists, then pack the results. Needs an NVIDIA GPU.
     summary: |
-      Run the given notebooks in this order, or all notebooks of lab/notebooks/ if you give none.
-      The task does not run the scenario generator. It stops at the first notebook that fails.
-      It always writes lab/outputs/archives/<start time>.zip, as "task pipeline" does.
+      Run the given notebooks of one scenario in this order, or all notebooks of the scenario if
+      you give none. The task does not run the scenario generator. It stops at the first notebook
+      that fails. It always writes lab/outputs/archives/<start time>_<name>.zip, as
+      "task pipeline" does.
 
       Examples:
         task notebooks
-        task notebooks -- lab/notebooks/03_material_calibration.ipynb lab/notebooks/04_evaluation.ipynb
+        task notebooks -- --scenario munich_sparse_mdt
+        task notebooks -- lab/notebooks/munich_map_errors/04_fine_tuning.ipynb lab/notebooks/munich_map_errors/05_evaluation.ipynb
     cmds:
       - uv run python lab/scripts/run_notebooks.py {{.CLI_ARGS}}
 

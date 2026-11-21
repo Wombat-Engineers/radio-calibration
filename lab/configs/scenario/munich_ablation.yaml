@@ -1,0 +1,19 @@
+# Capability: each part of the model is necessary. Each variant changes one part of the full
+# model (direct output, all channels, pretraining), then goes through the same pretraining and
+# fine-tuning. The variants use the same maps.npz, thus they need no more ray tracing.
+defaults:
+  - munich_base
+  - _self_
+
+name: munich_ablation
+
+# pretraining: false starts the fine-tuning from new parameters.
+# residual: true adds the network output to the Sionna RT path gain (the alternative output).
+# drop: input channels that the variant does not use.
+ablations:
+  no_pretraining: {pretraining: false, residual: false, drop: []}
+  residual_output: {pretraining: true, residual: true, drop: []}
+  no_buildings: {pretraining: true, residual: false, drop: [max_height, building_fraction]}
+  no_los: {pretraining: true, residual: false, drop: [los]}
+  no_distance: {pretraining: true, residual: false, drop: [distance]}
+  no_ray_tracing: {pretraining: true, residual: false, drop: [path_gain_db, has_path]}

@@ -1,0 +1,10 @@
+# Capability: the model needs few MDT records. Each fine-tuning uses only the first records of
+# one random order of the train part. All sizes use the same test part.
+defaults:
+  - munich_base
+  - _self_
+
+name: munich_sparse_mdt
+
+# Numbers of train records for the fine-tuning. Assumption.
+fine_tuning_sizes: [50, 100, 200]

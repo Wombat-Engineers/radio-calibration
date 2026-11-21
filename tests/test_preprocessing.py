@@ -7,16 +7,22 @@ import pytest
 from preprocessing import (
     MDT_POSITION_COLUMNS,
     SPLIT_NAMES,
+    MapsFile,
     mdt_to_arrays,
     mdt_to_long,
     read_cells,
+    read_maps,
     rsrp_column,
+    split_by_site,
+    split_mdt,
     split_records,
+    split_spatial,
     validate_cells,
     validate_mdt,
     write_cells,
+    write_maps,
 )
-from radio_calibration.core import Cell
+from radio_calibration.core import Cell, MapInputs, RadioMapGrid
 
 MIN_RSRP = -140.0
 RESOLUTION = 1.0
@@ -256,6 +262,130 @@ def test_split_records_empty():
 def test_split_records_bad_fractions(fractions):
     with pytest.raises(ValueError, match="fractions"):
         split_records(make_long(), fractions, seed=0)
+
+
+# --- split_by_site, split_spatial, split_mdt ---
+
+# Cell `a` is on site 0 and cell `b` is on site 1.
+SITE_CELLS = [make_cell("a", site=0), make_cell("b", site=1)]
+
+
+def test_split_by_site_no_leak():
+    long = make_long()
+
+    parts = split_by_site(long, SITE_CELLS, test_sites=[1], validation_fraction=0.2, seed=0)
+
+    assert set(parts["test"]["cell"]) == {"b"}
+    assert set(parts["train"]["cell"]) | set(parts["validation"]["cell"]) == {"a"}
+    assert sum(len(part) for part in parts.values()) == len(long)
+    assert set(parts["train"]["record"]).isdisjoint(parts["validation"]["record"])
+
+
+def test_split_by_site_keeps_all_rows():
+    # 11 records and the fraction 0.15: int(0.15 * 11) = 1 validation record, 10 train records.
+    long = make_long(num_records=11)
+
+    parts = split_by_site(long, SITE_CELLS, test_sites=[1], validation_fraction=0.15, seed=0)
+
+    assert sum(len(part) for part in parts.values()) == len(long)
+    assert parts["validation"]["record"].nunique() == 1
+    assert parts["train"]["record"].nunique() == 10
+
+
+@pytest.mark.parametrize("test_sites", [[5], [0, 1]])
+def test_split_by_site_bad_sites(test_sites):
+    with pytest.raises(ValueError, match="test sites"):
+        split_by_site(make_long(), SITE_CELLS, test_sites, 0.2, seed=0)
+
+
+def test_split_spatial_blocks_disjoint():
+    # x goes from 0 to 9 m, thus blocks of 2 m give 5 blocks.
+    parts = split_spatial(make_long(), block_size_m=2.0, fractions=FRACTIONS, seed=0)
+    blocks = [set(np.floor(part["x"] / 2.0)) for part in parts.values()]
+
+    assert blocks[0].isdisjoint(blocks[1]) and blocks[0].isdisjoint(blocks[2])
+    assert blocks[1].isdisjoint(blocks[2])
+
+
+def test_split_spatial_fractions():
+    parts = split_spatial(make_long(), block_size_m=2.0, fractions=FRACTIONS, seed=0)
+
+    # 5 blocks: int(0.6 * 5) = 3 train blocks, int(0.2 * 5) = 1 validation block, 1 test block.
+    assert [part["x"].floordiv(2.0).nunique() for part in parts.values()] == [3, 1, 1]
+
+
+def test_split_spatial_bad_block():
+    with pytest.raises(ValueError, match="block_size_m"):
+        split_spatial(make_long(), 0.0, FRACTIONS, seed=0)
+
+
+def test_split_mdt_methods():
+    long = make_long()
+    random = split_mdt(long, SITE_CELLS, {"method": "random", "fractions": FRACTIONS}, seed=0)
+    site = split_mdt(
+        long,
+        SITE_CELLS,
+        {"method": "site", "test_sites": [1], "validation_fraction": 0.2},
+        seed=0,
+    )
+
+    pd.testing.assert_frame_equal(random["train"], split_records(long, FRACTIONS, 0)["train"])
+    assert set(site["test"]["cell"]) == {"b"}
+
+
+def test_split_mdt_unknown_method():
+    with pytest.raises(ValueError, match="random, site, or spatial"):
+        split_mdt(make_long(), SITE_CELLS, {"method": "nope"}, seed=0)
+
+
+# --- maps.npz ---
+
+
+def make_maps(true_map: bool = True) -> MapsFile:
+    grid = RadioMapGrid(0.0, 0.0, 1.5, 10.0, 3, 2)
+    rng = np.random.default_rng(0)
+
+    def inputs(num_cells: int) -> MapInputs:
+        return MapInputs(
+            grid,
+            10 ** rng.uniform(-12, -8, size=(num_cells, 2, 3)),
+            rng.random((num_cells, 2, 3)) < 0.5,
+            np.ones((2, 3)),
+            np.full((2, 3), 0.25),
+            rng.uniform(0, 30, size=(num_cells, 2)),
+        )
+
+    variants = [inputs(2), inputs(2)]
+    return MapsFile(
+        target=inputs(2),
+        true_path_gain=inputs(2).path_gain if true_map else None,
+        variants=variants,
+        variant_labels=[variant.path_gain * 2 for variant in variants],
+        variant_scenes=np.array([0, 1]),
+    )
+
+
+@pytest.mark.parametrize("true_map", [True, False])
+def test_maps_round_trip(tmp_path, true_map):
+    maps = make_maps(true_map)
+
+    write_maps(tmp_path / "maps.npz", maps)
+    loaded = read_maps(tmp_path / "maps.npz")
+
+    assert loaded.target.grid == maps.target.grid
+    np.testing.assert_allclose(loaded.target.path_gain, maps.target.path_gain, rtol=1e-6)
+    np.testing.assert_array_equal(loaded.target.los, maps.target.los)
+    assert (loaded.true_path_gain is None) == (not true_map)
+    assert len(loaded.variants) == 2
+    np.testing.assert_allclose(loaded.variant_labels[1], maps.variant_labels[1], rtol=1e-6)
+    assert loaded.variant_scenes.tolist() == [0, 1]
+
+
+def test_read_maps_missing_key(tmp_path):
+    np.savez(tmp_path / "maps.npz", grid=np.zeros(6))
+
+    with pytest.raises(ValueError, match="variant_label"):
+        read_maps(tmp_path / "maps.npz")
 
 
 # --- mdt_to_arrays ---

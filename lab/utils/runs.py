@@ -20,19 +20,9 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from utils.config import load_config
-from utils.paths import CONFIG_DIR, DATA_DIR, OUTPUTS_DIR, PROJECT_ROOT
+from utils.paths import CONFIG_DIR, OUTPUTS_DIR, PROJECT_ROOT, scenario_dirs
 
-NOTEBOOK_DIR = PROJECT_ROOT / "lab" / "notebooks"
-NOTEBOOK_OUTPUT_DIR = OUTPUTS_DIR / "notebooks"
 ARCHIVE_DIR = OUTPUTS_DIR / "archives"
-# The results of a run. The figure and table directories come from the configuration.
-RESULT_PATHS: tuple[Path, ...] = (
-    DATA_DIR / "raw",
-    DATA_DIR / "processed",
-    OUTPUTS_DIR / "calibration",
-    NOTEBOOK_OUTPUT_DIR,
-    CONFIG_DIR,
-)
 # The packages that change the numbers of a run.
 _PACKAGES = ("torch", "drjit", "mitsuba", "sionna-rt", "numpy")
 _ARCHIVE_NAME = re.compile(r"[\w.-]+")
@@ -53,27 +43,38 @@ class Step:
     returncode: int
 
 
-def select_notebooks(names: Sequence[str]) -> list[Path]:
-    """Return the notebooks to run.
+def result_paths(scenario: str) -> tuple[Path, ...]:
+    """Return the results of a run of a scenario: its data, its outputs, and the configuration.
+
+    The figure and table directories come from the configuration, not from this function.
+    """
+    dirs = scenario_dirs(scenario)
+    return (dirs.raw, dirs.processed, dirs.outputs, CONFIG_DIR)
+
+
+def select_notebooks(scenario: str, names: Sequence[str]) -> list[Path]:
+    """Return the notebooks of a scenario to run.
 
     Args:
+        scenario: Name of the scenario.
         names: Paths of notebooks, relative to the repository root or absolute. If there is
-            no name, the function returns all notebooks of `lab/notebooks/`.
+            no name, the function returns all notebooks of `lab/notebooks/<scenario>/`.
 
     Returns:
         The paths of the notebooks. With no name, they are in the order of their names.
 
     Raises:
-        ValueError: If a name is not an `.ipynb` file in `lab/notebooks/`.
+        ValueError: If the scenario name is not valid, or if a name is not an `.ipynb` file
+            in `lab/notebooks/<scenario>/`.
     """
+    notebook_dir = scenario_dirs(scenario).notebooks.resolve()
     if not names:
-        return sorted(NOTEBOOK_DIR.glob("*.ipynb"))
-    notebook_dir = NOTEBOOK_DIR.resolve()
+        return sorted(notebook_dir.glob("*.ipynb"))
     paths = []
     for name in names:
         path = (PROJECT_ROOT / name).resolve()
         if path.suffix != ".ipynb" or path.parent != notebook_dir or not path.is_file():
-            raise ValueError(f"{name} is not a notebook in {NOTEBOOK_DIR}.")
+            raise ValueError(f"{name} is not a notebook in {notebook_dir}.")
         paths.append(path)
     return paths
 
@@ -81,7 +82,8 @@ def select_notebooks(names: Sequence[str]) -> list[Path]:
 def notebook_command(path: Path) -> list[str]:
     """Return the command that runs all cells of a notebook, as `task notebook` does.
 
-    The command writes a copy of the notebook with the outputs to `lab/outputs/notebooks/`.
+    The command writes a copy of the notebook with the outputs to
+    `lab/outputs/<scenario>/notebooks/`. The scenario is the name of the notebook directory.
     """
     return [
         sys.executable,
@@ -92,7 +94,7 @@ def notebook_command(path: Path) -> list[str]:
         "--to",
         "notebook",
         "--output-dir",
-        str(NOTEBOOK_OUTPUT_DIR),
+        str(scenario_dirs(path.parent.name).outputs / "notebooks"),
         str(path),
     ]
 
@@ -208,10 +210,12 @@ def write_archive(
     return archive
 
 
-def pack_results(started: datetime, steps: Sequence[Step], extra_paths: Sequence[Path]) -> Path:
-    """Write the results of a run to `lab/outputs/archives/<start time>.zip`.
+def pack_results(
+    scenario: str, started: datetime, steps: Sequence[Step], extra_paths: Sequence[Path]
+) -> Path:
+    """Write the results of a run to `lab/outputs/archives/<start time>_<scenario>.zip`.
 
-    The archive has the paths of `RESULT_PATHS`, the figure and the table directories of
+    The archive has the paths of `result_paths`, the figure and the table directories of
     the configuration, `extra_paths`, and two text files:
 
     - `config.yaml`: the composed configuration that the notebooks read.
@@ -219,6 +223,7 @@ def pack_results(started: datetime, steps: Sequence[Step], extra_paths: Sequence
       and `environment_info`.
 
     Args:
+        scenario: Name of the scenario.
         started: Start time of the run.
         steps: The steps from `run_steps`.
         extra_paths: Other files or directories in the repository.
@@ -226,7 +231,7 @@ def pack_results(started: datetime, steps: Sequence[Step], extra_paths: Sequence
     Returns:
         The path of the archive.
     """
-    cfg = load_config()
+    cfg = load_config(f"scenario={scenario}")
     output_dirs = [PROJECT_ROOT / cfg.output.figures.dir, PROJECT_ROOT / cfg.output.tables.dir]
     manifest = {
         "started": started.isoformat(timespec="seconds"),
@@ -237,9 +242,9 @@ def pack_results(started: datetime, steps: Sequence[Step], extra_paths: Sequence
     }
     return write_archive(
         ARCHIVE_DIR,
-        started.strftime("%Y%m%d-%H%M%S"),
+        f"{started.strftime('%Y%m%d-%H%M%S')}_{scenario}",
         PROJECT_ROOT,
-        [*RESULT_PATHS, *output_dirs, *extra_paths],
+        [*result_paths(scenario), *output_dirs, *extra_paths],
         {
             "config.yaml": OmegaConf.to_yaml(cfg, resolve=True),
             "manifest.json": json.dumps(manifest, indent=2),

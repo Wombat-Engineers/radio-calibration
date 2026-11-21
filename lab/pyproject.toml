@@ -29,7 +29,7 @@ build-backend = "uv_build"
 # Four top-level modules in lab/. The directories configs/, data/, notebooks/, outputs/,
 # reports/, and scripts/ are not modules.
 [tool.uv.build-backend]
-module-name = ["scenario", "utils", "preprocessing", "analysis"]
+module-name = ["scenario", "utils", "preprocessing", "experiments"]
 module-root = ""
 
 [tool.uv.sources]

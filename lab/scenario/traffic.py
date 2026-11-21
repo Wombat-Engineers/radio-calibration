@@ -11,7 +11,7 @@ from collections.abc import Sequence
 import numpy as np
 from scipy.ndimage import uniform_filter
 
-from scenario.height_map import HeightMap
+from radio_calibration.simulation import HeightMap
 
 _HOURS_PER_DAY = 24
 _MINUTES_PER_HOUR = 60

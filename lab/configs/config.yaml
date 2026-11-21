@@ -1,33 +1,35 @@
 # Root configuration. `task scenario` and `utils.load_config` compose this file.
+# The scenario comes from the group scenario/: select it with `scenario=<name>`.
 # Each file below goes into its own key: cfg.scenario, cfg.simulation, cfg.calibration,
 # cfg.evaluation.
 
 defaults:
-  - scenario@scenario
+  - scenario: munich_map_errors
   - simulation@simulation
   - calibration@calibration
   - evaluation@evaluation
   - _self_
 
-# Seed of all random generators: scenario, path solver, data split, and calibration.
+# Seed of all random generators: scenario, radio-map solver, data division, and training.
 seed: 42
 
 # Output files of the notebooks: figures (PNG) and tables (CSV).
 # A relative path starts at the repository root.
 output:
   figures:
-    dir: lab/reports/figures
+    dir: lab/reports/${scenario.name}/figures
   tables:
-    dir: lab/reports/tables
+    dir: lab/reports/${scenario.name}/tables
 
 # Run directory of `task scenario`. Hydra writes the configuration of the run (.hydra/) and
 # the log there. A relative path starts at the working directory: the repository root.
-# The data goes to lab/data/raw/ through DATA_DIR, thus the working directory does not change.
+# The data goes to lab/data/<scenario>/raw/ through DATA_DIR, thus the working directory does
+# not change.
 hydra:
   run:
-    dir: lab/outputs/scenario/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: lab/outputs/${scenario.name}/scenario/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: lab/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: lab/outputs/${scenario.name}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}
   job:
     chdir: false

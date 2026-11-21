@@ -1,11 +1,24 @@
-# Configuration of the scenario generator. Run it with `task scenario`.
-# lab/configs/config.yaml loads this file into its key `scenario`.
-# The generator writes cells.csv and mdt.csv to lab/data/raw/.
+# Shared settings of the scenarios of the Munich scene. This file is not a scenario: each
+# file munich_<capability>.yaml loads it in its `defaults` list and adds `name` and its own part.
+# lab/configs/config.yaml loads the selected scenario into its key `scenario`.
+# The generator writes cells.csv, mdt.csv, and maps.npz to lab/data/<name>/raw/.
 # Lengths are in meters. Angles are in degrees.
-# The Sionna RT configuration is in lab/configs/simulation.yaml. The seed is in lab/configs/config.yaml.
+# The Sionna RT solver settings are in lab/configs/simulation.yaml. The seed is in
+# lab/configs/config.yaml.
+
+# A Sionna RT scene, or a file <scene>.xml in lab/data/external/scenes.
+scene: munich
+
+# True: the generator changes the buildings to make the true world and writes the true path
+# gain map. The evaluation then also compares the maps with the true map.
+synthetic: true
+
+# Height of each UE above the ground. The radio maps use the same height.
+# 1.5 m is the default height of the Sionna RT radio-map plane.
+ue_height_m: 1.5
 
 # Grid for the height map and the building density. A "tile" is one square of this grid.
-# A "cell" is always a cell of a site.
+# A "cell" is always a cell of a site. The radio-map cell size must be a multiple of the tile.
 grid:
   tile_size_m: 5.0
   # A grid tile above this height is a building.
@@ -55,14 +68,6 @@ traffic:
   business_profile: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.10, 0.30, 0.70, 0.90, 1.00, 1.00,
                      0.90, 0.95, 1.00, 0.95, 0.85, 0.65, 0.40, 0.25, 0.15, 0.10, 0.05, 0.05]
 
-# UE height above the ground: a normal distribution, truncated to [min_m, max_m].
-# std_m is an assumption.
-ue_height:
-  mean_m: 1.5
-  std_m: 0.15
-  min_m: 0.5
-  max_m: 2.5
-
 measurement:
   # Measured RSRP = true RSRP + normal(rsrp_noise_mean_db, rsrp_noise_std_db).
   rsrp_noise_mean_db: -5.0
@@ -76,3 +81,33 @@ measurement:
   rsrp_resolution_db: 1.0
   # Maximum number of times that the generator samples the rejected records again.
   max_resample_rounds: 20
+
+# Random changes of the buildings: the difference between the true world and the 3D map.
+# Each building gets its changes independently. The values are assumptions ("strong" level).
+buildings:
+  # Scene objects that are not buildings.
+  ground_objects: [ground]
+  move_fraction: 0.4
+  # A moved building moves by uniform(-max_shift_m, max_shift_m) on x and on y.
+  max_shift_m: 10.0
+  height_fraction: 0.5
+  # A changed height is the old height times uniform(low, high).
+  height_factor: [0.5, 1.5]
+  delete_fraction: 0.1
+
+# Pretraining data: num_scenes changed scenes, each with layouts_per_scene random site
+# layouts. Each changed scene costs one call of the radio-map solver for its labels.
+pretraining:
+  num_scenes: 4                    # Recommended: 20
+  layouts_per_scene: 4             # Recommended: 10
+  # The center of the triangle of sites moves by uniform(-center_shift_m, center_shift_m) on
+  # x and on y. Assumption.
+  center_shift_m: 200.0
+  # The azimuths of all sectors turn by uniform(0, azimuth_shift_deg). Assumption.
+  azimuth_shift_deg: 120.0
+
+# Division of the MDT records. `random`: each record goes to one part at random.
+# The fractions are assumptions.
+split:
+  method: random
+  fractions: [0.7, 0.1, 0.2]

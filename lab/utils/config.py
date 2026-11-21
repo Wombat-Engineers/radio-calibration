@@ -17,7 +17,8 @@ def load_config(*overrides: str) -> DictConfig:
     and `output`. It has no `hydra` key.
 
     Args:
-        overrides: Hydra overrides, for example `"scenario.sites.isd_m=60"`.
+        overrides: Hydra overrides, for example `"scenario=munich_new_site"` or
+            `"scenario.sites.isd_m=60"`.
 
     Returns:
         The configuration.
@@ -37,10 +38,10 @@ def simulation_settings(cfg: DictConfig) -> SimulationSettings:
         cfg: The configuration from `load_config`.
 
     Returns:
-        The settings. `solver.seed` has the value of the root `seed`.
+        The settings. `radio_map.seed` has the value of the root `seed`.
 
     Raises:
-        ValueError: If a key is missing, or if `rx_batch_size` is less than 1.
+        ValueError: If a key is missing, or if a value is out of its range.
     """
     return SimulationSettings.from_mapping(OmegaConf.to_container(cfg.simulation, resolve=True))
 
@@ -55,7 +56,7 @@ def calibration_settings(cfg: DictConfig) -> CalibrationSettings:
         The settings.
 
     Raises:
-        ValueError: If a key is missing, or if a count is less than 1.
+        ValueError: If a key is missing, or if a value is out of its range.
     """
     return CalibrationSettings.from_mapping(OmegaConf.to_container(cfg.calibration, resolve=True))
 
@@ -67,7 +68,7 @@ def scene_source(cfg: DictConfig) -> str | Path:
     Sionna RT with the same name.
 
     Args:
-        cfg: The configuration from `load_config`. The function uses `simulation.scene.name`.
+        cfg: The configuration from `load_config`. The function uses `scenario.scene`.
 
     Returns:
         The path of the local scene file if it exists, else the name.
@@ -75,7 +76,7 @@ def scene_source(cfg: DictConfig) -> str | Path:
     Raises:
         ValueError: If the name has a character that is not a letter, a digit, or `_`.
     """
-    name = cfg.simulation.scene.name
+    name = cfg.scenario.scene
     # The name becomes a part of a file path. This check prevents a path outside SCENES_DIR.
     if not re.fullmatch(r"\w+", name):
         raise ValueError(f"The scene name '{name}' must have only letters, digits, and '_'.")

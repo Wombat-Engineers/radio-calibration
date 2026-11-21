@@ -24,115 +24,156 @@ class SimulationSettings:
 
     Attributes:
         frequency_hz: Carrier frequency, in Hz.
-        subcarrier_spacing_hz: Subcarrier spacing, in Hz. The scene bandwidth is one
-            resource element. The bandwidth changes only the thermal noise, not the RSRP.
-        receiver: Arguments of the Sionna RT `PlanarArray` of the UE.
-        solver: Arguments of a call of the Sionna RT `PathSolver`.
-        deterministic: Argument of the `PathSolver` constructor.
-        rx_batch_size: Number of UE positions in one call of the path solver.
+        radio_map: Arguments of a call of the Sionna RT `RadioMapSolver`. The geometry
+            arguments (`center`, `orientation`, `size`, `cell_size`) come from the grid,
+            not from this mapping.
+        radio_map_cell_size_m: Length of one side of a radio-map cell, in meters.
+        radio_map_tx_batch_size: Maximum number of transmitters in one solver call.
 
     Raises:
-        ValueError: If `rx_batch_size` is less than 1.
+        ValueError: If `radio_map_tx_batch_size` is less than 1, or if
+            `radio_map_cell_size_m` is not more than 0.
     """
 
     frequency_hz: float
-    subcarrier_spacing_hz: float
-    receiver: Mapping[str, Any]
-    solver: Mapping[str, Any]
-    deterministic: bool
-    rx_batch_size: int
+    radio_map: Mapping[str, Any]
+    radio_map_cell_size_m: float
+    radio_map_tx_batch_size: int
 
     def __post_init__(self) -> None:
-        _check_count("rx_batch_size", self.rx_batch_size)
+        _check_count("radio_map_tx_batch_size", self.radio_map_tx_batch_size)
+        if not self.radio_map_cell_size_m > 0:
+            raise ValueError(
+                f"radio_map_cell_size_m must be more than 0, but it is "
+                f"{self.radio_map_cell_size_m}."
+            )
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "SimulationSettings":
         """Make the settings from a mapping with the structure of `simulation.yaml`.
 
-        The function ignores keys that it does not use, for example `scene`.
-
         Args:
-            mapping: The keys `radio` (`frequency_hz`, `subcarrier_spacing_hz`), `receiver`,
-                `solver`, `deterministic`, and `rx_batch_size`.
+            mapping: The keys `radio` (`frequency_hz`), `radio_map`,
+                `radio_map_cell_size_m`, and `radio_map_tx_batch_size`.
 
         Returns:
             The settings.
 
         Raises:
-            ValueError: If a key is missing, or if `rx_batch_size` is less than 1.
+            ValueError: If a key is missing, or if a value is out of its range.
         """
         radio = _value(mapping, "radio", "")
         return cls(
             frequency_hz=float(_value(radio, "frequency_hz", "radio.")),
-            subcarrier_spacing_hz=float(_value(radio, "subcarrier_spacing_hz", "radio.")),
-            receiver=dict(_value(mapping, "receiver", "")),
-            solver=dict(_value(mapping, "solver", "")),
-            deterministic=bool(_value(mapping, "deterministic", "")),
-            rx_batch_size=int(_value(mapping, "rx_batch_size", "")),
+            radio_map=dict(_value(mapping, "radio_map", "")),
+            radio_map_cell_size_m=float(_value(mapping, "radio_map_cell_size_m", "")),
+            radio_map_tx_batch_size=int(_value(mapping, "radio_map_tx_batch_size", "")),
+        )
+
+
+@dataclass(frozen=True)
+class TrainingSettings:
+    """Settings of one training stage.
+
+    Attributes:
+        learning_rate: Learning rate of the Adam optimizer.
+        batch_size: Number of samples in one gradient step. The last batch of an epoch can
+            have fewer samples.
+        num_epochs: Number of epochs. In one epoch, each train sample is in one batch.
+
+    Raises:
+        ValueError: If `batch_size` or `num_epochs` is less than 1, or if `learning_rate` is
+            not more than 0.
+    """
+
+    learning_rate: float
+    batch_size: int
+    num_epochs: int
+
+    def __post_init__(self) -> None:
+        _check_count("batch_size", self.batch_size)
+        _check_count("num_epochs", self.num_epochs)
+        if not self.learning_rate > 0:
+            raise ValueError(f"learning_rate must be more than 0, but it is {self.learning_rate}.")
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any], path: str) -> "TrainingSettings":
+        """Make the settings from a mapping with the keys of one training stage.
+
+        Args:
+            mapping: The keys `learning_rate`, `batch_size`, and `num_epochs`.
+            path: Prefix of the keys in an error message, for example `"pretraining."`.
+
+        Returns:
+            The settings.
+
+        Raises:
+            ValueError: If a key is missing, or if a value is out of its range.
+        """
+        return cls(
+            learning_rate=float(_value(mapping, "learning_rate", path)),
+            batch_size=int(_value(mapping, "batch_size", path)),
+            num_epochs=int(_value(mapping, "num_epochs", path)),
         )
 
 
 @dataclass(frozen=True)
 class CalibrationSettings:
-    """Settings of the calibration of a neural material (arXiv:2311.18558).
+    """Settings of the U-Net that corrects the simulated path gain map.
 
     Attributes:
-        encoding_octaves: Number of frequencies of the positional encoding (Eq. 36).
-        hidden_layers: Number of hidden layers of the network.
-        hidden_units: Number of neurons in each hidden layer.
-        learning_rate: Learning rate of the AdamW optimizer.
-        weight_decay: Weight decay of the AdamW optimizer.
-        num_epochs: Number of epochs. In one epoch, each train record is in one batch.
-        batch_size: Number of records in one gradient step. The last batch of an epoch can
-            have fewer records.
-        validation_interval: Number of epochs between two calculations of the validation
-            loss.
-        scale_decay: Decay of the moving average of the power scale (Eq. 42).
+        base_channels: Number of feature channels of the first level of the U-Net.
+        depth: Number of down-sampling steps of the U-Net.
+        groups: Number of groups of each GroupNorm layer.
+        validation_fraction: Fraction of the pretraining samples for validation.
+        pretraining: Settings of the pretraining on the simulated scene variants.
+        fine_tuning: Settings of the fine-tuning on the MDT records.
 
     Raises:
-        ValueError: If `num_epochs`, `batch_size`, or `validation_interval` is less than 1.
+        ValueError: If a count is less than 1, or if `validation_fraction` is not more than 0
+            and less than 1.
     """
 
-    encoding_octaves: int
-    hidden_layers: int
-    hidden_units: int
-    learning_rate: float
-    weight_decay: float
-    num_epochs: int
-    batch_size: int
-    validation_interval: int
-    scale_decay: float
+    base_channels: int
+    depth: int
+    groups: int
+    validation_fraction: float
+    pretraining: TrainingSettings
+    fine_tuning: TrainingSettings
 
     def __post_init__(self) -> None:
-        for name in ("num_epochs", "batch_size", "validation_interval"):
+        for name in ("base_channels", "depth", "groups"):
             _check_count(name, getattr(self, name))
+        if not 0 < self.validation_fraction < 1:
+            raise ValueError(
+                f"validation_fraction must be more than 0 and less than 1, but it is "
+                f"{self.validation_fraction}."
+            )
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "CalibrationSettings":
         """Make the settings from a mapping with the structure of `calibration.yaml`.
 
-        The function ignores keys that it does not use, for example `split`.
-
         Args:
-            mapping: The keys `network` (`encoding_octaves`, `hidden_layers`,
-                `hidden_units`), `learning_rate`, `weight_decay`, `num_epochs`,
-                `batch_size`, `validation_interval`, and `scale_decay`.
+            mapping: The keys `network` (`base_channels`, `depth`, `groups`),
+                `validation_fraction`, `pretraining`, and `fine_tuning`.
 
         Returns:
             The settings.
 
         Raises:
-            ValueError: If a key is missing, or if a count is less than 1.
+            ValueError: If a key is missing, or if a value is out of its range.
         """
         network = _value(mapping, "network", "")
         return cls(
-            encoding_octaves=int(_value(network, "encoding_octaves", "network.")),
-            hidden_layers=int(_value(network, "hidden_layers", "network.")),
-            hidden_units=int(_value(network, "hidden_units", "network.")),
-            learning_rate=float(_value(mapping, "learning_rate", "")),
-            weight_decay=float(_value(mapping, "weight_decay", "")),
-            num_epochs=int(_value(mapping, "num_epochs", "")),
-            batch_size=int(_value(mapping, "batch_size", "")),
-            validation_interval=int(_value(mapping, "validation_interval", "")),
-            scale_decay=float(_value(mapping, "scale_decay", "")),
+            base_channels=int(_value(network, "base_channels", "network.")),
+            depth=int(_value(network, "depth", "network.")),
+            groups=int(_value(network, "groups", "network.")),
+            validation_fraction=float(_value(mapping, "validation_fraction", "")),
+            pretraining=TrainingSettings.from_mapping(
+                _value(mapping, "pretraining", ""), "pretraining."
+            ),
+            fine_tuning=TrainingSettings.from_mapping(
+                _value(mapping, "fine_tuning", ""), "fine_tuning."
+            ),
         )

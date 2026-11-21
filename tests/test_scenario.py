@@ -7,11 +7,14 @@ import pandas as pd
 import pytest
 from omegaconf import OmegaConf
 
-from preprocessing import read_cells
-from radio_calibration.simulation import load_rt_scene
+import scenario.generate as generate_module
+from preprocessing import read_cells, read_maps
+from radio_calibration.core import RadioMapGrid
+from radio_calibration.simulation import HeightMap, load_rt_scene
+from scenario.buildings import BuildingSettings, building_groups, perturb_buildings
 from scenario.generate import generate
-from scenario.height_map import HeightMap, building_height_map, is_outdoor
 from scenario.mdt import sample_mdt
+from scenario.rsrp import map_rsrp_fn
 from scenario.sites import place_sites
 from scenario.traffic import building_density, slot_counts, spatial_weights
 from utils import load_config
@@ -45,39 +48,115 @@ def make_sites(height_map: HeightMap, isd_m: float = 300.0):
     )  # fmt: skip
 
 
-# --- height_map (CUDA, small scene) ---
+# --- buildings (CUDA, small scene) ---
 
-# In `simple_street_canyon`, the street is along the x axis and buildings are on each side.
-STREET = [0.0, 0.0, 1.5]
-IN_BUILDING = [-40.0, 30.0, 1.5]
-
-
-@pytest.fixture(scope="module")
-def scene():
-    return load_rt_scene("simple_street_canyon")
-
-
-def test_height_map_street_canyon(scene):
-    height_map = building_height_map(scene, tile_size=5.0)
-
-    assert height_map.heights.ndim == 2
-    assert (height_map.heights > 10.0).any()
-    assert (height_map.heights < 0.5).any()
-    assert (height_map.heights >= 0.0).all()
+# In `simple_street_canyon`, each building is one shape `building_<i>`, and the floor is
+# `floor`.
+CANYON_BUILDINGS = BuildingSettings(
+    ground_objects=("floor",),
+    move_fraction=1.0,
+    max_shift_m=5.0,
+    height_fraction=1.0,
+    height_factor=(0.5, 0.5),
+    delete_fraction=0.0,
+)
 
 
-def test_height_map_bad_tile_size(scene):
+def test_building_groups_names():
+    names = ["Heilig_Geist-itu_marble", "Heilig_Geist-itu_metal", "Alter_Hof", "ground"]
+
+    groups = building_groups(names, ["ground"])
+
+    assert groups == {
+        "Alter_Hof": ["Alter_Hof"],
+        "Heilig_Geist": ["Heilig_Geist-itu_marble", "Heilig_Geist-itu_metal"],
+    }
+
+
+@pytest.mark.parametrize(
+    "change", [{"move_fraction": 1.5}, {"max_shift_m": -1.0}, {"height_factor": (0.0, 1.0)}]
+)
+def test_building_settings_bad_value(change):
+    values = {
+        "ground_objects": (),
+        "move_fraction": 0.5,
+        "max_shift_m": 1.0,
+        "height_fraction": 0.5,
+        "height_factor": (0.5, 1.5),
+        "delete_fraction": 0.1,
+    }
     with pytest.raises(ValueError):
-        building_height_map(scene, tile_size=0.0)
+        BuildingSettings(**(values | change))
 
 
-def test_is_outdoor_street(scene):
-    assert is_outdoor(scene, np.array([STREET])).tolist() == [True]
+def bbox_of(scene, name):
+    box = scene.objects[name].mi_mesh.bbox()
+    return np.array([*box.min, *box.max], dtype=float)
 
 
-def test_is_outdoor_in_building(scene):
-    outside_scene = [1000.0, 1000.0, 1.5]
-    assert is_outdoor(scene, np.array([IN_BUILDING, outside_scene])).tolist() == [False, False]
+def perturbed(seed: int, settings: BuildingSettings = CANYON_BUILDINGS):
+    scene = load_rt_scene("simple_street_canyon", merge_shapes=False)
+    changes = perturb_buildings(scene, np.random.default_rng(seed), settings)
+    return scene, changes
+
+
+def test_perturb_repeatable_seed():
+    _, first = perturbed(3)
+    _, second = perturbed(3)
+
+    pd.testing.assert_frame_equal(first, second)
+    assert len(first) == 6
+
+
+def test_perturb_delete_fraction():
+    scene, changes = perturbed(0, BuildingSettings(("floor",), 0.0, 0.0, 0.0, (1.0, 1.0), 1.0))
+
+    assert changes["deleted"].all()
+    assert list(scene.objects) == ["floor"]
+
+
+def test_perturb_height_keeps_base():
+    before = bbox_of(load_rt_scene("simple_street_canyon", merge_shapes=False), "building_1")
+
+    scene, changes = perturbed(0)
+    after = bbox_of(scene, "building_1")
+
+    assert changes.set_index("building").loc["building_1", "height_factor"] == 0.5
+    assert after[2] == pytest.approx(before[2], abs=1e-3)
+    assert after[5] - after[2] == pytest.approx(0.5 * (before[5] - before[2]), rel=1e-4)
+
+
+def test_perturb_move_shifts_xy():
+    before = bbox_of(load_rt_scene("simple_street_canyon", merge_shapes=False), "building_2")
+
+    scene, changes = perturbed(0)
+    after = bbox_of(scene, "building_2")
+
+    row = changes.set_index("building").loc["building_2"]
+    np.testing.assert_allclose(
+        after[[0, 1]] - before[[0, 1]], [row["dx_m"], row["dy_m"]], atol=1e-3
+    )
+
+
+# --- true RSRP from the map ---
+
+GRID = RadioMapGrid(0.0, 0.0, 1.5, 10.0, 2, 1)
+
+
+def test_map_rsrp_value():
+    rsrp_fn = map_rsrp_fn(np.array([[[1e-10, 0.0]]]), GRID, [4.85])
+
+    rsrp = rsrp_fn(np.array([[5.0, 5.0, 1.5], [15.0, 5.0, 1.5], [-5.0, 5.0, 1.5]]))
+
+    # 4.85 dBm + 10 log10(1e-10) = -95.15 dBm. A path gain of 0 and a position outside the
+    # grid give NaN.
+    assert rsrp[0, 0] == pytest.approx(-95.15)
+    assert np.isnan(rsrp[1:, 0]).all()
+
+
+def test_map_rsrp_bad_shape():
+    with pytest.raises(ValueError, match="shape"):
+        map_rsrp_fn(np.zeros((2, 1, 2)), GRID, [4.85])
 
 
 # --- sites ---
@@ -202,7 +281,7 @@ TRAFFIC = OmegaConf.create(
         "business_profile": DAY,
     }
 )
-UE_HEIGHT = OmegaConf.create({"mean_m": 1.5, "std_m": 0.15, "min_m": 0.5, "max_m": 2.5})
+UE_HEIGHT_M = 1.5
 MEASUREMENT = OmegaConf.create(
     {
         "rsrp_noise_mean_db": -5.0,
@@ -237,7 +316,7 @@ def run(rsrp_fn=constant_rsrp, outdoor_fn=all_outdoor, seed=0, **measurement) ->
         MIN_BUILDING_HEIGHT,
         DENSITY,
         TRAFFIC,
-        UE_HEIGHT,
+        UE_HEIGHT_M,
         OmegaConf.merge(MEASUREMENT, measurement),
     )
 
@@ -325,11 +404,9 @@ def test_mdt_never_in_building_tile():
     assert (HEIGHTS[row, col] == 0.0).all()
 
 
-def test_mdt_height_distribution():
-    z = run()["z"]
-
-    assert z.between(UE_HEIGHT.min_m, UE_HEIGHT.max_m).all()
-    assert z.mean() == pytest.approx(UE_HEIGHT.mean_m, abs=0.05)
+def test_mdt_fixed_height():
+    # The ground of HEIGHT_MAP is at z = 0.
+    assert (run()["z"] == UE_HEIGHT_M).all()
 
 
 def test_mdt_density_bias():
@@ -357,26 +434,47 @@ def compose_scenario(*overrides: str):
 
 # A small scene and a small sample count: the GPU of the development machine has 4 GB.
 SMALL_RUN = (
-    "simulation.scene.name=simple_street_canyon",
-    "simulation.solver.samples_per_src=10000",
-    "simulation.solver.max_depth=2",
-    "simulation.solver.diffraction=false",
+    "scenario.scene=simple_street_canyon",
+    "scenario.buildings.ground_objects=[floor]",
+    "scenario.pretraining.num_scenes=2",
+    "scenario.pretraining.layouts_per_scene=2",
+    "scenario.pretraining.center_shift_m=5",
+    "simulation.radio_map.samples_per_tx=100000",
+    "simulation.radio_map.max_depth=2",
+    "simulation.radio_map.diffraction=false",
+    "simulation.radio_map_cell_size_m=10",
+    "simulation.radio_map_tx_batch_size=50",
     "scenario.sites.isd_m=60",
     "scenario.sites.mast_height_m=10",
     "scenario.traffic.records_per_day=200",
     "scenario.traffic.density_radius_m=20",
+)
+SCENARIOS = (
+    "munich_map_errors",
+    "munich_new_site",
+    "munich_unmeasured_area",
+    "munich_sparse_mdt",
+    "munich_ablation",
 )
 
 
 def test_scenario_config_composes():
     cfg = compose_scenario()
 
-    assert cfg.simulation.solver.max_depth > 0
-    assert cfg.simulation.solver.refraction is True
+    assert cfg.scenario.name == "munich_map_errors"
+    assert cfg.scenario.synthetic is True
+    assert cfg.simulation.radio_map.refraction is True
     assert cfg.scenario.grid.tile_size_m > 0
-    assert "radio" not in cfg.scenario and "scene" not in cfg.scenario
-    assert "receiver" not in cfg.scenario.antenna
+    assert "radio" not in cfg.scenario
     assert "seed" not in cfg.scenario and "seed" not in cfg.calibration
+
+
+@pytest.mark.parametrize("name", SCENARIOS)
+def test_each_scenario_composes(name):
+    cfg = compose_scenario(f"scenario={name}")
+
+    assert cfg.scenario.name == name
+    assert cfg.output.figures.dir == f"lab/reports/{name}/figures"
 
 
 def test_generate_writes_outputs(tmp_path):
@@ -384,24 +482,45 @@ def test_generate_writes_outputs(tmp_path):
 
     cells = read_cells(tmp_path / "cells.csv")
     mdt = pd.read_csv(tmp_path / "mdt.csv", parse_dates=["timestamp"])
+    maps = read_maps(tmp_path / "maps.npz")
     rsrp_columns = [f"rsrp_{cell.name}" for cell in cells]
 
     assert len(cells) == 9
     assert list(mdt.columns) == ["timestamp", "x", "y", "z", *rsrp_columns]
     assert len(mdt) == pytest.approx(200, rel=0.3)
     assert mdt[rsrp_columns].notna().any(axis=1).all()
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["cells.csv", "mdt.csv"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["cells.csv", "maps.npz", "mdt.csv"]
+    assert maps.target.num_cells == 9
+    assert maps.true_path_gain.shape == maps.target.path_gain.shape
+    assert len(maps.variants) == len(maps.variant_labels) == 4
+    assert maps.variant_scenes.tolist() == [0, 0, 1, 1]
 
 
-def test_generate_logs_rsrp_time(tmp_path, caplog):
+def test_generate_counts_radio_map_calls(tmp_path, monkeypatch, caplog):
+    calls = []
+    real_map = generate_module.compute_path_gain_map
+    real_inputs = generate_module.compute_map_inputs
+
+    def counted_map(scene, cells, grid, simulation):
+        calls.append(len(cells))
+        return real_map(scene, cells, grid, simulation)
+
+    def counted_inputs(scene, cells, grid, height_map, simulation, min_height):
+        calls.append(len(cells))
+        return real_inputs(scene, cells, grid, height_map, simulation, min_height)
+
+    monkeypatch.setattr(generate_module, "compute_path_gain_map", counted_map)
+    monkeypatch.setattr(generate_module, "compute_map_inputs", counted_inputs)
     with caplog.at_level(logging.INFO, logger="scenario.generate"):
         generate(compose_scenario(*SMALL_RUN), tmp_path)
 
-    records = len(pd.read_csv(tmp_path / "mdt.csv"))
-    rsrp_lines = [r for r in caplog.records if r.getMessage().startswith("RSRP:")]
-    assert len(rsrp_lines) == 1
-    positions, calls, seconds, _ = rsrp_lines[0].args
-    assert positions >= records
-    assert calls >= 1
-    assert seconds > 0
-    assert any(r.getMessage().startswith("Total:") for r in caplog.records)
+    # The original scene (9 cells and 4 layouts of 9 cells), the true world, and each of
+    # the 2 changed pretraining scenes (2 layouts of 9 cells).
+    assert calls == [45, 9, 18, 18]
+    total = [r for r in caplog.records if r.getMessage().startswith("Total:")]
+    assert len(total) == 1 and total[0].args[1] == 4
+
+
+def test_generate_rejects_not_synthetic(tmp_path):
+    with pytest.raises(ValueError, match="synthetic"):
+        generate(compose_scenario(*SMALL_RUN, "scenario.synthetic=false"), tmp_path)

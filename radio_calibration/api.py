@@ -1,226 +1,233 @@
-"""Interface for another system: calibrate, save, load, and use a neural material.
+"""Interface for another system: pretrain, fine-tune, save, load, and use a radio-map model.
 
-The data has a fixed format:
-
-- `cells`: a sequence of `Cell`. All cells have the same antenna array.
-- `positions`: UE positions in meters, with shape `[n, 3]`.
-- `rsrp_dbm`: measured RSRP in dBm, with shape `[n, len(cells)]`. NaN shows that the
-  record does not have the cell.
-
-The import of this module sets the Mitsuba variant `cuda_ad_mono_polarized` for the full
-process. The functions need an NVIDIA GPU.
+The model corrects the Sionna RT path gain map of each cell with a U-Net. The caller
+calculates the input maps one time with `radio_calibration.simulation.compute_map_inputs`
+and gives them to each method. The methods do no ray tracing.
 """
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import torch
 
-from radio_calibration.calibration import calibrate, load_calibration, log_error, save_calibration
+from radio_calibration.calibration import (
+    FEATURE_NAMES,
+    Normalization,
+    UNet,
+    fine_tune,
+    load_model,
+    log_error,
+    predict_maps_db,
+    pretrain,
+    save_model,
+    sensitivity_floor_db,
+)
 from radio_calibration.core import (
     CalibrationSettings,
     Cell,
+    MapInputs,
     SimulationSettings,
     check_cells,
     check_measurements,
     check_positions,
+    rsrp_from_map,
 )
-from radio_calibration.evaluation import error_statistics, grouped_statistics, nearest_distance
-from radio_calibration.simulation import (
-    NeuralRadioMaterial,
-    apply_neural_material,
-    assign_material,
-    compute_rsrp_dbm,
-    load_rt_scene,
-    make_material_network,
-)
-
-if TYPE_CHECKING:
-    import sionna.rt
+from radio_calibration.evaluation import error_statistics, grouped_statistics, map_statistics
+from radio_calibration.simulation import compute_map_inputs, load_rt_scene
 
 __all__ = [
-    "CalibratedModel",
     "CalibrationSettings",
     "Cell",
+    "MapInputs",
+    "RadioMapModel",
     "SimulationSettings",
+    "compute_map_inputs",
     "error_statistics",
     "grouped_statistics",
     "load_rt_scene",
-    "nearest_distance",
+    "map_statistics",
+    "sensitivity_floor_db",
 ]
 
-_LOADED_MATERIAL_NAME = "calibrated"
+
+def _check_cells_of(inputs: MapInputs, cells: Sequence[Cell]) -> None:
+    check_cells(cells)
+    if len(cells) != inputs.num_cells:
+        raise ValueError(f"There are {len(cells)} cells, but the maps have {inputs.num_cells}.")
 
 
-class CalibratedModel:
-    """A scene, its cells, and a calibrated neural material with its power scale.
+class RadioMapModel:
+    """A U-Net that corrects simulated path gain maps.
 
     Args:
-        scene: The Sionna RT scene, from `load_rt_scene`. It must have no transmitter and
-            no receiver.
-        cells: The cells.
-        material: A calibrated material. Its scale must not be None.
-        simulation: The settings of the simulation.
-
-    Raises:
-        ValueError: If the cells are not valid (see `check_cells`), or if the material has
-            no power scale.
+        network: The network.
+        normalization: The statistics of the pretraining inputs.
+        device: The PyTorch device of the network.
+        channels: The input channels of the network.
+        residual: If False (the default), the network output is the normalized path gain in
+            dB. If True, the network output is added to the simulated path gain in dB.
     """
 
     def __init__(
         self,
-        scene: "sionna.rt.Scene",
-        cells: Sequence[Cell],
-        material: NeuralRadioMaterial,
-        simulation: SimulationSettings,
+        network: UNet,
+        normalization: Normalization,
+        device: torch.device,
+        channels: Sequence[str] = FEATURE_NAMES,
+        residual: bool = False,
     ) -> None:
-        check_cells(cells)
-        if material.scale is None:
-            raise ValueError("The material has no power scale. Calibrate it before you use it.")
-        self.scene = scene
-        self.cells = list(cells)
-        self.material = material
-        self.simulation = simulation
+        self.network = network.to(device)
+        self.normalization = normalization
+        self.device = device
+        self.channels = tuple(channels)
+        self.residual = residual
 
     @classmethod
-    def fit(
+    def pretrain(
         cls,
-        scene: "sionna.rt.Scene",
-        cells: Sequence[Cell],
+        inputs: Sequence[MapInputs],
+        labels: Sequence[np.ndarray],
+        calibration: CalibrationSettings,
+        seed: int,
+        device: torch.device,
+        floor_db: float,
+        channels: Sequence[str] = FEATURE_NAMES,
+        residual: bool = False,
+    ) -> tuple["RadioMapModel", pd.DataFrame]:
+        """Train a new model on simulated scene variants.
+
+        Args:
+            inputs: The input maps of each variant.
+            labels: The target linear path gain of each variant.
+            calibration: The settings.
+            seed: The seed.
+            device: The PyTorch device.
+            floor_db: The floor of the path gain in dB. Use `sensitivity_floor_db` with the
+                smallest RSRP that a UE reports and the powers of the cells.
+            channels: The input channels.
+            residual: The output type.
+
+        Returns:
+            The model and the history of the pretraining.
+
+        Raises:
+            ValueError: As for `radio_calibration.calibration.pretrain`.
+        """
+        result = pretrain(inputs, labels, calibration, seed, device, floor_db, channels, residual)
+        model = cls(result.network, result.normalization, device, channels, residual)
+        return model, result.history
+
+    @classmethod
+    def load(cls, path: Path, device: torch.device) -> "RadioMapModel":
+        """Read a model from a `.pt` file of `save`."""
+        network, normalization, channels, residual = load_model(path, device)
+        return cls(network, normalization, device, channels, residual)
+
+    def save(self, path: Path) -> None:
+        """Write the model to a `.pt` file."""
+        save_model(path, self.network, self.normalization, self.channels, self.residual)
+
+    def fine_tune(
+        self,
+        inputs: MapInputs,
         positions: np.ndarray,
         rsrp_dbm: np.ndarray,
         validation: tuple[np.ndarray, np.ndarray],
+        cells: Sequence[Cell],
         calibration: CalibrationSettings,
-        simulation: SimulationSettings,
         seed: int,
-    ) -> tuple["CalibratedModel", pd.DataFrame]:
-        """Calibrate a new neural material against measured RSRP (arXiv:2311.18558).
-
-        The function gives the new material to all objects of `scene`. It replaces the
-        materials of the scene file.
+    ) -> pd.DataFrame:
+        """Change all parameters of the model to agree with the measured RSRP.
 
         Args:
-            scene: The Sionna RT scene. It must have no transmitter and no receiver.
-            cells: The cells.
-            positions: Positions of the train records in meters, with shape `[n, 3]`.
-            rsrp_dbm: Measured RSRP of the train records in dBm, with shape
-                `[n, len(cells)]`.
-            validation: Positions and measured RSRP of the validation records, with the
-                same format.
-            calibration: The settings of the calibration.
-            simulation: The settings of the simulation.
-            seed: Seed of the initial weights and of the random order of the records.
+            inputs: The input maps of the cells.
+            positions: Train positions in meters, with shape `[n, 3]`.
+            rsrp_dbm: Measured train RSRP in dBm, with shape `[n, len(cells)]`. NaN shows
+                that the record does not have the cell.
+            validation: Validation positions and RSRP, with the same format.
+            cells: The cells, in the order of the maps.
+            calibration: The settings.
+            seed: The seed of the batch order.
 
         Returns:
-            The calibrated model, and the history of the steps (one row for each step, with
-            the columns `step`, `epoch`, `loss`, `scale`, `validation_loss`, and
-            `step_seconds`).
+            The history of the fine-tuning.
 
         Raises:
-            ValueError: If the cells or the measurements are not valid, if there is no train
-                record, or if all simulated powers of a batch are 0.
+            ValueError: If the data is not in the fixed format, or if no train record has a
+                received pair in the grid.
         """
-        check_cells(cells)
+        _check_cells_of(inputs, cells)
         check_measurements(positions, rsrp_dbm, len(cells))
         check_measurements(*validation, len(cells))
-        network = make_material_network(
-            calibration.encoding_octaves,
-            calibration.hidden_layers,
-            calibration.hidden_units,
-            seed=seed,
-        )
-        material = apply_neural_material(scene, network)
-        result = calibrate(
-            scene,
-            cells,
-            material,
-            np.asarray(positions, dtype=float),
-            np.asarray(rsrp_dbm, dtype=float),
-            (np.asarray(validation[0], dtype=float), np.asarray(validation[1], dtype=float)),
+        return fine_tune(
+            self.network,
+            self.normalization,
+            inputs,
+            positions,
+            rsrp_dbm,
+            validation,
+            np.array([cell.power_rs_dbm for cell in cells], dtype=float),
             calibration,
-            simulation,
-            seed=seed,
+            seed,
+            self.device,
+            self.channels,
+            self.residual,
         )
-        return cls(scene, cells, material, simulation), result.history
 
-    @classmethod
-    def load(
-        cls,
-        scene: "sionna.rt.Scene",
-        cells: Sequence[Cell],
-        path: Path,
-        simulation: SimulationSettings,
-    ) -> "CalibratedModel":
-        """Read a model that `save` wrote.
-
-        Args:
-            scene: The Sionna RT scene of the calibration.
-            cells: The cells.
-            path: Path of the `.npz` file.
-            simulation: The settings of the simulation.
+    def predict_path_gain_db(self, inputs: MapInputs) -> np.ndarray:
+        """Calculate the corrected path gain map of each cell.
 
         Returns:
-            The model.
-
-        Raises:
-            ValueError: If the file is not a valid calibration file, or if the cells are not
-                valid.
+            The path gain in dB, with shape `[n_cells, ny, nx]`.
         """
-        return cls(scene, cells, load_calibration(Path(path), _LOADED_MATERIAL_NAME), simulation)
+        return predict_maps_db(
+            self.network, self.normalization, inputs, self.device, self.channels, self.residual
+        )
 
-    def save(self, path: Path) -> None:
-        """Write the material and its power scale to one `.npz` file.
+    def predict_rsrp_dbm(
+        self, inputs: MapInputs, positions: np.ndarray, cells: Sequence[Cell]
+    ) -> np.ndarray:
+        """Calculate the RSRP of each cell at each position.
+
+        The RSRP is the reference-signal power of the cell plus the corrected path gain of
+        the grid cell that holds the position.
 
         Args:
-            path: Path of the file. Its suffix must be `.npz`.
-
-        Raises:
-            ValueError: If the suffix of `path` is not `.npz`.
-        """
-        save_calibration(Path(path), self.material)
-
-    def predict_rsrp_dbm(self, positions: np.ndarray) -> np.ndarray:
-        """Calculate the RSRP of each cell at each position, with the power scale.
-
-        The function gives the material of the model to all objects of the scene before the
-        calculation. Thus two models can use the same scene.
-
-        Args:
-            positions: UE positions in meters, with shape `[n, 3]`.
+            inputs: The input maps of the cells.
+            positions: Positions in meters, with shape `[n, 3]`.
+            cells: The cells, in the order of the maps.
 
         Returns:
-            The RSRP in dBm, with shape `[n, len(cells)]`. A value is NaN if no path
-            connects the cell and the position.
+            The RSRP in dBm, with shape `[n, len(cells)]`. A position outside the grid gives
+            NaN.
 
         Raises:
-            ValueError: If `positions` is not valid (see `check_positions`).
+            ValueError: If the positions or the cells are not in the fixed format.
         """
+        _check_cells_of(inputs, cells)
         check_positions(positions)
-        assign_material(self.scene, self.material)
-        return compute_rsrp_dbm(
-            self.scene,
-            self.cells,
-            np.asarray(positions, dtype=float),
-            self.simulation,
-            self.material.scale,
+        power_rs_dbm = np.array([cell.power_rs_dbm for cell in cells], dtype=float)
+        return rsrp_from_map(
+            self.predict_path_gain_db(inputs), inputs.grid, positions, power_rs_dbm
         )
 
-    def errors_db(self, positions: np.ndarray, rsrp_dbm: np.ndarray) -> np.ndarray:
-        """Calculate the signed error between the measured and the predicted RSRP.
-
-        Args:
-            positions: UE positions in meters, with shape `[n, 3]`.
-            rsrp_dbm: Measured RSRP in dBm, with shape `[n, len(cells)]`.
+    def errors_db(
+        self,
+        inputs: MapInputs,
+        positions: np.ndarray,
+        rsrp_dbm: np.ndarray,
+        cells: Sequence[Cell],
+    ) -> np.ndarray:
+        """Calculate the measured minus the predicted RSRP of each pair, in dB.
 
         Returns:
-            The measured RSRP minus the predicted RSRP, in dB, with shape
-            `[n, len(cells)]`. A value is NaN if the record does not have the cell or if no
-            path connects the cell and the position.
+            The error with shape `[n, len(cells)]`. NaN where there is no measurement or the
+            position is outside the grid.
 
         Raises:
-            ValueError: If the measurements are not valid (see `check_measurements`).
+            ValueError: If the data is not in the fixed format.
         """
-        check_measurements(positions, rsrp_dbm, len(self.cells))
-        return log_error(np.asarray(rsrp_dbm, dtype=float), self.predict_rsrp_dbm(positions))
+        check_measurements(positions, rsrp_dbm, len(cells))
+        return log_error(rsrp_dbm, self.predict_rsrp_dbm(inputs, positions, cells))

@@ -5,11 +5,10 @@ from collections.abc import Callable, Sequence
 import numpy as np
 import pandas as pd
 from omegaconf import DictConfig
-from scipy.stats import truncnorm
 
 from preprocessing import MDT_POSITION_COLUMNS, rsrp_column
 from radio_calibration.core import Cell
-from scenario.height_map import HeightMap
+from radio_calibration.simulation import HeightMap
 from scenario.traffic import slot_counts, spatial_weights
 
 _HOURS_PER_DAY = 24
@@ -21,7 +20,7 @@ def _draw_positions(
     hours: np.ndarray,
     weights: dict[int, np.ndarray],
     height_map: HeightMap,
-    ue_height: DictConfig,
+    ue_height_m: float,
 ) -> np.ndarray:
     """Draw one position for each record. Return the positions with shape `[n, 3]`."""
     nx = height_map.heights.shape[1]
@@ -31,16 +30,11 @@ def _draw_positions(
         flat[chosen] = rng.choice(weights[hour].size, size=chosen.sum(), p=weights[hour].ravel())
     row, col = np.divmod(flat, nx)
     offset = rng.uniform(size=(hours.size, 2))
-    low = (ue_height.min_m - ue_height.mean_m) / ue_height.std_m
-    high = (ue_height.max_m - ue_height.mean_m) / ue_height.std_m
-    height = truncnorm.rvs(
-        low, high, loc=ue_height.mean_m, scale=ue_height.std_m, size=hours.size, random_state=rng
-    )
     return np.column_stack(
         [
             height_map.x_min + (col + offset[:, 0]) * height_map.tile_size,
             height_map.y_min + (row + offset[:, 1]) * height_map.tile_size,
-            height_map.z_ground + height,
+            np.full(hours.size, height_map.z_ground + ue_height_m),
         ]
     )
 
@@ -54,7 +48,7 @@ def sample_mdt(
     min_building_height_m: float,
     density: np.ndarray,
     traffic: DictConfig,
-    ue_height: DictConfig,
+    ue_height_m: float,
     measurement: DictConfig,
 ) -> pd.DataFrame:
     """Generate MDT records that are independent of each other.
@@ -75,7 +69,7 @@ def sample_mdt(
         density: Building density of each grid tile.
         traffic: Keys `start`, `num_days`, `slot_minutes`, `records_per_day`,
             `business_exponent`, `residential_profile`, `business_profile`.
-        ue_height: Keys `mean_m`, `std_m`, `min_m`, `max_m`.
+        ue_height_m: Height of each UE above the ground, in meters.
         measurement: Keys `rsrp_noise_mean_db`, `rsrp_noise_std_db`, `gnss_std_m`,
             `min_rsrp_dbm`, `rsrp_resolution_db`, `max_resample_rounds`.
 
@@ -116,7 +110,7 @@ def sample_mdt(
     for _ in range(measurement.max_resample_rounds):
         if pending.size == 0:
             break
-        drawn = _draw_positions(rng, hours[pending], weights, height_map, ue_height)
+        drawn = _draw_positions(rng, hours[pending], weights, height_map, ue_height_m)
         is_out = np.asarray(outdoor_fn(drawn), dtype=bool)
         measured = np.full((pending.size, len(cells)), np.nan)
         noise = rng.normal(

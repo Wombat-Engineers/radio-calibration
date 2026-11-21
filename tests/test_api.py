@@ -1,174 +1,158 @@
-"""Tests for radio_calibration.api. They use a small scene, a small network, and CUDA."""
+"""Tests for radio_calibration.api. They use small maps and the CPU."""
 
-import math
 import subprocess
 import sys
 
 import numpy as np
 import pytest
+import torch
 
 from radio_calibration import api
-from radio_calibration.api import CalibratedModel
-from radio_calibration.simulation import (
-    NeuralRadioMaterial,
-    apply_neural_material,
-    compute_rsrp_dbm,
-    load_rt_scene,
-    make_material_network,
+from radio_calibration.api import RadioMapModel
+from radio_calibration.calibration import (
+    HISTORY_COLUMNS,
+    Normalization,
+    base_path_gain_db,
+    make_network,
 )
-from tests.test_calibration import CALIBRATION, POSITIONS, RSRP_DBM
-from tests.test_simulation import CELLS, IN_BUILDING, NETWORK, SIMULATION
+from tests.test_calibration import CALIBRATION, CPU, FLOOR_DB, GRID, INPUTS, LABELS, records
+from tests.test_core import make_cell
 
-VALIDATION = (POSITIONS[:2], RSRP_DBM[:2])
-
-
-@pytest.fixture
-def scene():
-    """A new scene for each test: a model replaces the materials of the scene."""
-    return load_rt_scene("simple_street_canyon")
+CELLS = [
+    make_cell("a", x=10.0, y=10.0, z=20.0, num_rows=2, num_cols=2, power_rs_dbm=0.0),
+    make_cell("b", x=50.0, y=40.0, z=20.0, num_rows=2, num_cols=2, power_rs_dbm=3.0),
+]
 
 
-def fit(scene, positions=POSITIONS, rsrp_dbm=RSRP_DBM):
-    return CalibratedModel.fit(
-        scene, CELLS, positions, rsrp_dbm, VALIDATION, CALIBRATION, SIMULATION, seed=0
-    )
+@pytest.fixture(scope="module")
+def pretrained():
+    return RadioMapModel.pretrain(INPUTS, LABELS, CALIBRATION, 0, CPU, FLOOR_DB)
 
 
-def test_fit_returns_model_and_history(scene):
-    model, history = fit(scene)
+def test_pretrain_returns_model_and_history(pretrained):
+    model, history = pretrained
 
-    assert list(history.columns) == [
-        "step",
-        "epoch",
-        "loss",
-        "scale",
-        "validation_loss",
-        "step_seconds",
-    ]
-    steps_per_epoch = math.ceil(len(POSITIONS) / CALIBRATION.batch_size)
-    assert len(history) == CALIBRATION.num_epochs * steps_per_epoch
-    assert model.material.scale > 0
-    assert all(obj.radio_material is model.material for obj in scene.objects.values())
+    assert isinstance(model, RadioMapModel)
+    assert list(history.columns) == list(HISTORY_COLUMNS)
 
 
-def test_fit_no_train_record(scene):
-    with pytest.raises(ValueError, match="train record"):
-        fit(scene, POSITIONS[:0], RSRP_DBM[:0])
+def test_predict_path_gain_shape(pretrained):
+    model, _ = pretrained
+
+    assert model.predict_path_gain_db(INPUTS[0]).shape == (2, GRID.ny, GRID.nx)
 
 
-def test_fit_bad_rsrp_shape(scene):
-    with pytest.raises(ValueError, match="shape"):
-        fit(scene, rsrp_dbm=np.zeros((len(POSITIONS), 3)))
+def test_predict_rsrp_equals_power_plus_pg(pretrained):
+    model, _ = pretrained
+    positions = np.array([[15.0, 25.0, 1.5]])
+    row, column, _ = GRID.cell_index(positions)
+
+    rsrp = model.predict_rsrp_dbm(INPUTS[0], positions, CELLS)
+    path_gain_db = model.predict_path_gain_db(INPUTS[0])[:, row[0], column[0]]
+
+    np.testing.assert_allclose(rsrp[0], [0.0, 3.0] + path_gain_db)
 
 
-def test_model_needs_scale(scene):
-    material = apply_neural_material(scene, make_material_network(**NETWORK, seed=1))
+def test_predict_outside_grid_nan(pretrained):
+    model, _ = pretrained
 
-    with pytest.raises(ValueError, match="scale"):
-        CalibratedModel(scene, CELLS, material, SIMULATION)
+    rsrp = model.predict_rsrp_dbm(INPUTS[0], np.array([[-50.0, 0.0, 1.5]]), CELLS)
 
-
-def test_predict_equals_compute_rsrp_dbm(scene):
-    model, _ = fit(scene)
-
-    expected = compute_rsrp_dbm(scene, CELLS, POSITIONS, SIMULATION, model.material.scale)
-
-    np.testing.assert_array_equal(model.predict_rsrp_dbm(POSITIONS), expected)
+    assert np.isnan(rsrp).all()
 
 
-@pytest.mark.parametrize("positions", [np.zeros((4, 2)), np.array([[0.0, np.inf, 1.5]])])
-def test_predict_bad_positions(scene, positions):
-    model, _ = fit(scene)
+def test_predict_wrong_cell_count(pretrained):
+    model, _ = pretrained
 
-    with pytest.raises(ValueError, match="positions"):
-        model.predict_rsrp_dbm(positions)
-
-
-def test_predict_reassigns_material(scene):
-    model, _ = fit(scene)
-    first = model.predict_rsrp_dbm(POSITIONS)
-    # Other weights and another name: Sionna RT refuses two materials with one name.
-    state = model.material.state()
-    state["weights"] = state["weights"] * np.float16(0.5)
-    other = CalibratedModel(
-        scene, CELLS, NeuralRadioMaterial.from_state(state, "other"), SIMULATION
-    )
-
-    second = other.predict_rsrp_dbm(POSITIONS)
-
-    assert not np.array_equal(second, first, equal_nan=True)
-    np.testing.assert_array_equal(model.predict_rsrp_dbm(POSITIONS), first)
+    with pytest.raises(ValueError, match="cells"):
+        model.predict_rsrp_dbm(INPUTS[0], np.zeros((1, 3)), CELLS[:1])
 
 
-def test_errors_db_nan_rules(scene):
-    model, _ = fit(scene)
-    positions = np.vstack([POSITIONS, [IN_BUILDING]])
-    predicted = model.predict_rsrp_dbm(positions)
-    measured = predicted + 1.0
-    measured[0, 1] = np.nan
-    # The UE in the building has no path: the predicted RSRP is NaN.
-    measured[-1] = -100.0
-
-    errors = model.errors_db(positions, measured)
-
-    assert np.isnan(errors[0, 1])
-    assert np.isnan(errors[-1]).all()
-    finite = np.isfinite(measured) & np.isfinite(predicted)
-    np.testing.assert_allclose(errors[finite], 1.0)
-
-
-def test_errors_db_bad_shape(scene):
-    model, _ = fit(scene)
+def test_fine_tune_bad_rsrp_shape(pretrained):
+    model, _ = pretrained
+    positions, rsrp = records(10, 1)
 
     with pytest.raises(ValueError, match="shape"):
-        model.errors_db(POSITIONS, RSRP_DBM[:, :1])
+        model.fine_tune(
+            INPUTS[0], positions, rsrp[:, :1], records(5, 2), CELLS, CALIBRATION, seed=0
+        )
 
 
-def test_save_load_round_trip(scene, tmp_path):
-    model, _ = fit(scene)
-    path = tmp_path / "calibration.npz"
+def test_errors_db_nan_rules(pretrained):
+    model, _ = pretrained
+    positions = np.array([[15.0, 25.0, 1.5], [-50.0, 0.0, 1.5]])
+    measured = np.array([[-80.0, np.nan], [-80.0, -80.0]])
+
+    errors = model.errors_db(INPUTS[0], positions, measured, CELLS)
+
+    assert np.isfinite(errors[0, 0])
+    assert np.isnan(errors[0, 1]) and np.isnan(errors[1]).all()
+
+
+def test_save_load_round_trip(pretrained, tmp_path):
+    model, _ = pretrained
+    path = tmp_path / "model.pt"
+
     model.save(path)
+    loaded = RadioMapModel.load(path, CPU)
 
-    loaded = CalibratedModel.load(scene, CELLS, path, SIMULATION)
-
-    assert loaded.material.scale == model.material.scale
-    np.testing.assert_array_equal(
-        loaded.predict_rsrp_dbm(POSITIONS), model.predict_rsrp_dbm(POSITIONS)
+    np.testing.assert_allclose(
+        loaded.predict_path_gain_db(INPUTS[1]), model.predict_path_gain_db(INPUTS[1]), rtol=1e-6
     )
+    assert loaded.channels == model.channels and loaded.residual == model.residual
 
 
-def test_save_bad_suffix(scene, tmp_path):
-    model, _ = fit(scene)
+def test_save_bad_suffix(pretrained, tmp_path):
+    model, _ = pretrained
 
-    with pytest.raises(ValueError, match="npz"):
-        model.save(tmp_path / "calibration.txt")
+    with pytest.raises(ValueError, match=".pt"):
+        model.save(tmp_path / "model.npz")
 
 
 def test_integration_flow(tmp_path):
-    # The sequence of another system, with names from radio_calibration.api only.
-    cells = [api.Cell(**vars(cell)) for cell in CELLS]
-    scene = api.load_rt_scene("simple_street_canyon")
-    model, _ = api.CalibratedModel.fit(
-        scene, cells, POSITIONS, RSRP_DBM, VALIDATION, CALIBRATION, SIMULATION, seed=0
-    )
-    model.save(tmp_path / "calibration.npz")
+    """Pretrain, fine-tune, save, load, and predict, as another system does."""
+    model, _ = RadioMapModel.pretrain(INPUTS, LABELS, CALIBRATION, 0, CPU, FLOOR_DB)
+    before = model.predict_path_gain_db(INPUTS[0])
+    positions, rsrp = records(40, 1)
 
-    loaded = api.CalibratedModel.load(
-        api.load_rt_scene("simple_street_canyon"), cells, tmp_path / "calibration.npz", SIMULATION
-    )
-    errors = loaded.errors_db(POSITIONS, RSRP_DBM)
-    statistics = api.error_statistics(
-        RSRP_DBM, loaded.predict_rsrp_dbm(POSITIONS), quantiles=[0.5, 0.9]
+    history = model.fine_tune(INPUTS[0], positions, rsrp, records(10, 2), CELLS, CALIBRATION, 0)
+    model.save(tmp_path / "model.pt")
+    loaded = RadioMapModel.load(tmp_path / "model.pt", CPU)
+    predicted = loaded.predict_rsrp_dbm(INPUTS[0], positions, CELLS)
+
+    assert (history["stage"] == "fine_tuning").all()
+    assert not np.allclose(loaded.predict_path_gain_db(INPUTS[0]), before)
+    assert predicted.shape == rsrp.shape
+
+
+def test_untrained_model_default_is_direct():
+    torch.manual_seed(0)
+    normalization = Normalization.fit(INPUTS, FLOOR_DB)
+    model = RadioMapModel(make_network(6, CALIBRATION), normalization, CPU)
+
+    # A new direct model gives the mean input path gain everywhere.
+    assert model.residual is False
+    np.testing.assert_allclose(
+        model.predict_path_gain_db(INPUTS[0]), normalization.path_gain_mean, rtol=1e-5
     )
 
-    assert errors.shape == RSRP_DBM.shape
-    assert np.isfinite(statistics["mae_db"])
+
+def test_untrained_residual_model_equals_ray_tracing():
+    torch.manual_seed(0)
+    model = RadioMapModel(
+        make_network(6, CALIBRATION), Normalization.fit(INPUTS, FLOOR_DB), CPU, residual=True
+    )
+    predicted = model.predict_path_gain_db(INPUTS[0])
+
+    np.testing.assert_allclose(predicted, base_path_gain_db(INPUTS[0], FLOOR_DB), rtol=1e-5)
+
+
+def test_api_exports():
+    assert {"RadioMapModel", "compute_map_inputs", "map_statistics"} <= set(api.__all__)
 
 
 def test_api_does_not_import_lab():
-    # A new process: this test process imported other modules already. The list has no
-    # matplotlib: sionna.rt imports it.
-    names = ["scenario", "utils", "preprocessing", "analysis", "hydra", "torch"]
+    names = ["scenario", "utils", "preprocessing", "experiments", "hydra"]
     code = (
         "import sys, radio_calibration.api; "
         f"print([name for name in {names!r} if name in sys.modules])"

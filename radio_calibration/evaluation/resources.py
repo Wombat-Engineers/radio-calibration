@@ -21,7 +21,7 @@ class ResourceMonitor:
 
     Example:
         with ResourceMonitor() as monitor:
-            model, history = CalibratedModel.fit(...)
+            model, history = RadioMapModel.pretrain(...)
         monitor.summary()["peak_gpu_memory_mib"]
 
     Args:

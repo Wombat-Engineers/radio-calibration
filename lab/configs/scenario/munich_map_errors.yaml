@@ -1,0 +1,8 @@
+# Capability: the model corrects the errors of the 3D map (moved, resized, and removed
+# buildings) better than Sionna RT and an SPM model with the form of the Atoll planning tool.
+# The MDT records are divided at random.
+defaults:
+  - munich_base
+  - _self_
+
+name: munich_map_errors

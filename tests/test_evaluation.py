@@ -11,11 +11,16 @@ import pytest
 
 import radio_calibration.evaluation.resources as resources
 from radio_calibration.calibration import dbm_to_mw, smape
+from radio_calibration.core import MapInputs, RadioMapGrid
 from radio_calibration.evaluation import (
     ResourceMonitor,
+    SpmModel,
     error_statistics,
+    fit_offset,
     grouped_statistics,
+    map_statistics,
     nearest_distance,
+    spm_inputs,
 )
 
 QUANTILES = (0.5, 0.9)
@@ -87,12 +92,9 @@ def test_error_statistics_smape_matches_loss():
     rng = np.random.default_rng(0)
     measured = rng.uniform(-120.0, -60.0, size=(50, 1))
     simulated = rng.uniform(-120.0, -60.0, size=(50, 1))
-    scale = 3.0
-    # radio_calibration.simulation.compute_rsrp_dbm divides the simulated power by the scale.
-    scaled_dbm = simulated - 10.0 * np.log10(scale)
 
-    expected = np.mean(smape(dbm_to_mw(measured), dbm_to_mw(simulated) / scale))
-    assert error_statistics(measured, scaled_dbm, QUANTILES)["smape"] == pytest.approx(expected)
+    expected = np.mean(smape(dbm_to_mw(measured), dbm_to_mw(simulated), 0.0))
+    assert error_statistics(measured, simulated, QUANTILES)["smape"] == pytest.approx(expected)
 
 
 def test_error_statistics_quantiles():
@@ -178,6 +180,135 @@ def test_grouped_statistics_shape_mismatch():
 
 
 # --- nearest_distance ---
+
+
+# --- map_statistics ---
+
+
+def test_map_statistics_known():
+    truth = np.full((1, 2, 2), 1e-10)
+    predicted = np.full((1, 2, 2), -97.0)
+
+    statistics = map_statistics(truth, predicted, QUANTILES)
+
+    # The truth is -100 dB, thus each error is -100 - (-97) = -3 dB.
+    assert statistics["grid_cells"] == 4
+    assert statistics["bias_db"] == pytest.approx(-3.0)
+    assert statistics["mae_db"] == pytest.approx(3.0)
+    assert statistics["rmse_db"] == pytest.approx(3.0)
+
+
+def test_map_statistics_skips_zero_truth():
+    truth = np.array([[[1e-10, 0.0]]])
+    predicted = np.array([[[-100.0, -50.0]]])
+
+    statistics = map_statistics(truth, predicted, QUANTILES)
+
+    assert statistics["grid_cells"] == 1
+    assert statistics["mae_db"] == pytest.approx(0.0)
+
+
+def test_map_statistics_min_true_db():
+    truth = np.array([[[1e-10, 1e-16]]])
+    predicted = np.array([[[-100.0, -100.0]]])
+
+    statistics = map_statistics(truth, predicted, QUANTILES, min_true_db=-150.0)
+
+    # The truth of the second grid cell is -160 dB, below -150 dB.
+    assert statistics["grid_cells"] == 1
+    assert statistics["mae_db"] == pytest.approx(0.0)
+
+
+def test_map_statistics_no_prediction():
+    statistics = map_statistics(np.full((1, 1, 2), 1e-10), np.array([[[-100.0, NAN]]]), QUANTILES)
+
+    assert statistics["no_prediction_fraction"] == pytest.approx(0.5)
+
+
+def test_map_statistics_shape_mismatch():
+    with pytest.raises(ValueError, match="shapes"):
+        map_statistics(np.ones((1, 2, 2)), np.ones((1, 2, 3)), QUANTILES)
+
+
+def test_map_statistics_no_truth():
+    with pytest.raises(ValueError, match="minimum"):
+        map_statistics(np.zeros((1, 2, 2)), np.zeros((1, 2, 2)), QUANTILES)
+
+
+# --- baselines ---
+
+
+def test_fit_offset_known():
+    measured = np.array([[-80.0, NAN], [-90.0, -70.0]])
+
+    assert fit_offset(measured, measured - 4.0) == pytest.approx(4.0)
+
+
+def test_fit_offset_ignores_no_path():
+    measured = np.array([[-80.0, -90.0]])
+    simulated = np.array([[-84.0, NAN]])
+
+    assert fit_offset(measured, simulated) == pytest.approx(4.0)
+
+
+def test_fit_offset_no_pair():
+    with pytest.raises(ValueError, match="minimum"):
+        fit_offset(np.array([[NAN]]), np.array([[-80.0]]))
+
+
+SPM_COEFFICIENTS = np.array([20.0, 35.0, -5.0, -2.0, -8.0, 6.0])
+
+
+def spm_data(height_m: np.ndarray):
+    rng = np.random.default_rng(0)
+    distance = rng.uniform(10.0, 1000.0, size=200)
+    los = rng.random(200) < 0.3
+    clutter = rng.uniform(0.0, 1.0, size=200)
+    path_loss = SpmModel(SPM_COEFFICIENTS).path_loss_db(distance, height_m, los, clutter)
+    return distance, height_m, los, clutter, path_loss
+
+
+def test_spm_recovers_coefficients():
+    height = np.random.default_rng(1).uniform(10.0, 40.0, size=200)
+
+    model = SpmModel.fit(*spm_data(height))
+
+    np.testing.assert_allclose(model.coefficients, SPM_COEFFICIENTS, atol=1e-9)
+
+
+def test_spm_constant_height_no_error():
+    distance, height, los, clutter, path_loss = spm_data(np.full(200, 25.0))
+
+    model = SpmModel.fit(distance, height, los, clutter, path_loss)
+
+    np.testing.assert_allclose(model.path_loss_db(distance, height, los, clutter), path_loss)
+
+
+def test_spm_no_pair():
+    with pytest.raises(ValueError, match="minimum"):
+        SpmModel.fit(*(np.empty(0) for _ in range(5)))
+
+
+def test_spm_inputs():
+    grid = RadioMapGrid(0.0, 0.0, 1.5, 10.0, 2, 1)
+    inputs = MapInputs(
+        grid,
+        np.ones((1, 1, 2)) * 1e-10,
+        np.array([[[True, False]]]),
+        np.zeros((1, 2)),
+        np.array([[0.0, 0.5]]),
+        np.array([[0.0, 0.0]]),
+    )
+
+    distance, height, los, clutter, inside = spm_inputs(
+        inputs, [25.0], np.array([[3.0, 4.0, 1.5], [15.0, 5.0, 1.5], [-5.0, 0.0, 1.5]])
+    )
+
+    assert distance[:2, 0].tolist() == [5.0, pytest.approx(np.hypot(15.0, 5.0))]
+    assert height[:, 0].tolist() == [25.0, 25.0, 25.0]
+    assert los[:2, 0].tolist() == [True, False]
+    assert clutter[:2, 0].tolist() == [0.0, 0.5]
+    assert inside.tolist() == [True, True, False]
 
 
 def test_nearest_distance():

@@ -19,6 +19,7 @@ from utils import (
     COLORS,
     CONFIG_DIR,
     DATA_DIR,
+    NOTEBOOK_DIR,
     OUTPUTS_DIR,
     PROJECT_ROOT,
     calibration_settings,
@@ -28,15 +29,16 @@ from utils import (
     load_config,
     save_figure,
     save_table,
+    scenario_dirs,
     scene_source,
     seed_everything,
     setup_notebook,
     simulation_settings,
 )
 from utils.runs import (
-    NOTEBOOK_OUTPUT_DIR,
     environment_info,
     notebook_command,
+    result_paths,
     run_steps,
     select_notebooks,
     write_archive,
@@ -145,8 +147,8 @@ def test_save_table_not_configured(no_output):
 def test_load_config_output():
     output = load_config().output
 
-    assert output.figures.dir == "lab/reports/figures"
-    assert output.tables.dir == "lab/reports/tables"
+    assert output.figures.dir == "lab/reports/munich_map_errors/figures"
+    assert output.tables.dir == "lab/reports/munich_map_errors/tables"
 
 
 def test_setup_notebook_outside_ipython():
@@ -168,37 +170,37 @@ def test_simulation_settings_resolves_seed():
     cfg = load_config()
     settings = simulation_settings(cfg)
 
-    assert type(settings.solver) is dict
-    assert settings.solver["seed"] == cfg.seed
+    assert type(settings.radio_map) is dict
+    assert settings.radio_map["seed"] == cfg.seed
     assert settings.frequency_hz == cfg.simulation.radio.frequency_hz
-    assert settings.rx_batch_size == cfg.simulation.rx_batch_size
+    assert settings.radio_map_tx_batch_size == cfg.simulation.radio_map_tx_batch_size
 
 
 def test_calibration_settings_from_config():
     cfg = load_config()
     settings = calibration_settings(cfg)
 
-    assert settings.hidden_units == cfg.calibration.network.hidden_units
-    assert settings.num_epochs == cfg.calibration.num_epochs
-    assert settings.scale_decay == cfg.calibration.scale_decay
+    assert settings.base_channels == cfg.calibration.network.base_channels
+    assert settings.depth == cfg.calibration.network.depth
+    assert settings.pretraining.num_epochs == cfg.calibration.pretraining.num_epochs
 
 
 def test_scene_source_builtin(monkeypatch, tmp_path):
     monkeypatch.setattr(paths_module, "SCENES_DIR", tmp_path)
 
-    assert scene_source(load_config("simulation.scene.name=munich")) == "munich"
+    assert scene_source(load_config("scenario.scene=munich")) == "munich"
 
 
 def test_scene_source_local_file(monkeypatch, tmp_path):
     monkeypatch.setattr(paths_module, "SCENES_DIR", tmp_path)
     (tmp_path / "site.xml").write_text("<scene/>")
 
-    assert scene_source(load_config("simulation.scene.name=site")) == tmp_path / "site.xml"
+    assert scene_source(load_config("scenario.scene=site")) == tmp_path / "site.xml"
 
 
 def test_scene_source_bad_name():
     with pytest.raises(ValueError, match="letters"):
-        scene_source(load_config("simulation.scene.name=../munich"))
+        scene_source(load_config("scenario.scene=../munich"))
 
 
 def test_load_config_branches():
@@ -212,7 +214,7 @@ def test_load_config_one_seed():
     cfg = load_config()
 
     assert cfg.seed == 42
-    assert cfg.simulation.solver.seed == 42
+    assert cfg.simulation.radio_map.seed == 42
 
 
 def test_load_config_override():
@@ -228,45 +230,68 @@ def test_load_config_evaluation():
     evaluation = load_config().evaluation
 
     assert all(0 <= quantile <= 1 for quantile in evaluation.quantiles)
-    assert 0 < evaluation.bootstrap.confidence < 1
+    assert evaluation.num_bins > 0
 
 
 # --- runs ---
 
 
+def test_scenario_dirs():
+    dirs = scenario_dirs("munich_map_errors")
+
+    assert dirs.raw == DATA_DIR / "munich_map_errors" / "raw"
+    assert dirs.processed == DATA_DIR / "munich_map_errors" / "processed"
+    assert dirs.outputs == OUTPUTS_DIR / "munich_map_errors"
+    assert dirs.notebooks == NOTEBOOK_DIR / "munich_map_errors"
+
+
+@pytest.mark.parametrize("name", ["../x", "a/b", ""])
+def test_scenario_dirs_bad_name(name):
+    with pytest.raises(ValueError, match="letters"):
+        scenario_dirs(name)
+
+
+def test_result_paths():
+    dirs = scenario_dirs("munich_new_site")
+
+    assert result_paths("munich_new_site") == (dirs.raw, dirs.processed, dirs.outputs, CONFIG_DIR)
+
+
 def test_select_notebooks_default():
-    notebooks = select_notebooks([])
+    notebooks = select_notebooks("munich_map_errors", [])
 
     assert notebooks == sorted(notebooks)
-    assert "04_evaluation.ipynb" in [path.name for path in notebooks]
+    assert "05_evaluation.ipynb" in [path.name for path in notebooks]
 
 
 def test_select_notebooks_given():
-    assert select_notebooks(["lab/notebooks/04_evaluation.ipynb"]) == [
-        (PROJECT_ROOT / "lab" / "notebooks" / "04_evaluation.ipynb").resolve()
-    ]
+    name = "lab/notebooks/munich_map_errors/05_evaluation.ipynb"
+
+    assert select_notebooks("munich_map_errors", [name]) == [(PROJECT_ROOT / name).resolve()]
 
 
 @pytest.mark.parametrize(
     "name",
     [
         "README.md",
-        "lab/notebooks/../README.md",
+        "lab/notebooks/munich_map_errors/../README.md",
         "../x.ipynb",
-        "lab/notebooks/nosuch.ipynb",
-        "notebooks/04_evaluation.ipynb",
+        "lab/notebooks/munich_map_errors/nosuch.ipynb",
+        "lab/notebooks/munich_new_site/05_evaluation.ipynb",
     ],
 )
 def test_select_notebooks_outside(name):
     with pytest.raises(ValueError, match="not a notebook"):
-        select_notebooks([name])
+        select_notebooks("munich_map_errors", [name])
 
 
 def test_notebook_command_output_dir():
-    command = notebook_command(PROJECT_ROOT / "lab" / "notebooks" / "04_evaluation.ipynb")
+    command = notebook_command(NOTEBOOK_DIR / "munich_ablation" / "05_evaluation.ipynb")
 
     assert command[:4] == [sys.executable, "-m", "jupyter", "nbconvert"]
-    assert command[command.index("--output-dir") + 1] == str(NOTEBOOK_OUTPUT_DIR)
+    assert command[command.index("--output-dir") + 1] == str(
+        OUTPUTS_DIR / "munich_ablation" / "notebooks"
+    )
 
 
 def test_run_steps_stops_at_failure():

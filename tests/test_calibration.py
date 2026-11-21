@@ -1,382 +1,428 @@
-"""Tests for radio_calibration.calibration.
+"""Tests for radio_calibration.calibration. They use small maps and the CPU."""
 
-The `calibrate` and file tests use a small scene and CUDA.
-"""
-
-from dataclasses import replace
-
-import mitsuba as mi
 import numpy as np
+import pandas as pd
 import pytest
+import torch
 
-import radio_calibration.calibration.train as train_module
 from radio_calibration.calibration import (
+    FEATURE_NAMES,
+    HISTORY_COLUMNS,
+    Normalization,
+    UNet,
     absolute_log_error,
-    calibrate,
+    base_path_gain_db,
     dbm_to_mw,
-    load_calibration,
+    feature_tensor,
+    fine_tune,
+    load_model,
     log_error,
-    received_powers,
-    save_calibration,
-    scale_estimate,
+    make_network,
+    predict_db,
+    predict_maps_db,
+    pretrain,
+    save_model,
+    sensitivity_floor_db,
     smape,
-    update_scale,
 )
-from radio_calibration.core import CalibrationSettings
-from radio_calibration.simulation import (
-    apply_neural_material,
-    compute_rsrp_mw,
-    load_rt_scene,
-    make_material_network,
-)
-from tests.test_simulation import CELLS, NETWORK, POINTS, SIMULATION, weights_of
+from radio_calibration.core import CalibrationSettings, MapInputs, RadioMapGrid
+from tests.test_core import CALIBRATION_MAPPING
 
-CALIBRATION = CalibrationSettings(
-    **NETWORK,
-    learning_rate=1e-2,
-    weight_decay=0.0,
-    num_epochs=2,
-    # Four records: each epoch has a batch of 3 records and a batch of 1 record.
-    batch_size=3,
-    validation_interval=1,
-    scale_decay=0.5,
-)
-POSITIONS = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
-# One record does not have the second cell.
-RSRP_DBM = np.array([[-80.0, -90.0], [-85.0, np.nan], [-90.0, -85.0], [-95.0, -80.0]])
+CPU = torch.device("cpu")
+CALIBRATION = CalibrationSettings.from_mapping(CALIBRATION_MAPPING)
+# 6 rows and 7 columns: the features need padding to 8 x 8 for depth 2.
+GRID = RadioMapGrid(x_min=0.0, y_min=0.0, z=1.5, cell_size=10.0, nx=7, ny=6)
+# The path gains of the test maps are from -120 dB to -70 dB.
+FLOOR_DB = -130.0
+
+
+def make_inputs(seed: int, num_cells: int = 2) -> MapInputs:
+    rng = np.random.default_rng(seed)
+    path_gain = 10.0 ** rng.uniform(-12, -7, size=(num_cells, GRID.ny, GRID.nx))
+    path_gain[:, 0, 0] = 0.0
+    return MapInputs(
+        grid=GRID,
+        path_gain=path_gain,
+        los=rng.random((num_cells, GRID.ny, GRID.nx)) < 0.5,
+        max_height=rng.uniform(0, 30, size=(GRID.ny, GRID.nx)),
+        building_fraction=rng.uniform(0, 1, size=(GRID.ny, GRID.nx)),
+        cell_xy=rng.uniform(0, 60, size=(num_cells, 2)),
+    )
+
+
+INPUTS = [make_inputs(seed) for seed in range(5)]
+# The labels are the inputs plus 3 dB, thus a residual network can learn them.
+LABELS = [inputs.path_gain * 2.0 for inputs in INPUTS]
 
 
 # --- loss ---
 
 
 def test_dbm_to_mw():
-    np.testing.assert_allclose(dbm_to_mw(np.array([0.0, 10.0, -30.0])), [1.0, 10.0, 1e-3])
-    assert np.isnan(dbm_to_mw(np.array([np.nan]))).all()
+    np.testing.assert_allclose(dbm_to_mw(np.array([0.0, -30.0, np.nan])), [1.0, 1e-3, np.nan])
 
 
 def test_smape_equal():
-    assert smape(np.array([2.0]), np.array([2.0])).tolist() == [0.0]
+    assert smape(np.array([2.0]), np.array([2.0]), 0.0).tolist() == [0.0]
 
 
-def test_smape_no_path():
-    assert smape(np.array([2.0]), np.array([0.0])).tolist() == [1.0]
+def test_smape_value():
+    # |1 - 3| / (1 + 3) = 0.5
+    assert smape(np.array([1.0]), np.array([3.0]), 0.0).tolist() == [0.5]
 
 
-def test_smape_symmetric():
-    first, second = np.array([1.0, 4.0]), np.array([3.0, 1.0])
-
-    np.testing.assert_array_equal(smape(first, second), smape(second, first))
-    np.testing.assert_allclose(smape(first, second), [0.5, 0.6])
+def test_smape_zero_label_epsilon():
+    assert smape(np.array([0.0]), np.array([0.0]), 1e-30).tolist() == [0.0]
 
 
-def test_smape_drjit_equals_numpy():
-    first, second = np.array([1.0, 4.0], dtype="f4"), np.array([3.0, 1.0], dtype="f4")
+def test_smape_numpy_equals_torch():
+    measured, simulated = np.array([1e-10, 3e-12]), np.array([2e-10, 1e-12])
 
-    np.testing.assert_allclose(
-        smape(mi.Float(first), mi.Float(second)).numpy(), smape(first, second), rtol=1e-6
-    )
+    expected = smape(measured, simulated, 1e-30)
+    actual = smape(torch.tensor(measured), torch.tensor(simulated), 1e-30).numpy()
 
-
-def test_scale_estimate_exact():
-    measured = np.array([1.0, 2.0, 5.0])
-
-    assert scale_estimate(measured, 3.0 * measured) == pytest.approx(3.0)
-
-
-def test_scale_estimate_strongest_dominates():
-    measured_dbm = np.array([-60.0, -100.0, -120.0])
-    # The simulation is 8 dB, 3 dB, and 2 dB above the measurement.
-    simulated_dbm = measured_dbm + np.array([8.0, 3.0, 2.0])
-
-    scale = scale_estimate(dbm_to_mw(measured_dbm), dbm_to_mw(simulated_dbm))
-
-    assert 10.0 * np.log10(scale) == pytest.approx(8.0, abs=0.01)
-
-
-@pytest.mark.parametrize(
-    ("measured", "simulated"), [([0.0, 0.0], [1.0, 2.0]), ([1.0, 2.0], [0.0, 0.0]), ([], [])]
-)
-def test_scale_estimate_no_value(measured, simulated):
-    with pytest.raises(ValueError, match="scale"):
-        scale_estimate(np.array(measured), np.array(simulated))
-
-
-def test_update_scale_first():
-    assert update_scale(None, 2.0, decay=0.9) == 2.0
-
-
-def test_update_scale_ema():
-    assert update_scale(1.0, 2.0, decay=0.75) == pytest.approx(1.25)
-
-
-@pytest.mark.parametrize("decay", [-0.1, 1.0, 1.5])
-def test_update_scale_bad_decay(decay):
-    with pytest.raises(ValueError, match="decay"):
-        update_scale(1.0, 2.0, decay)
-
-
-def test_absolute_log_error_nan():
-    error = absolute_log_error(np.array([np.nan, -90.0]), np.array([-90.0, np.nan]))
-
-    assert np.isnan(error).all()
+    np.testing.assert_allclose(actual, expected)
 
 
 def test_log_error_sign():
-    # The simulation is 5 dB below the measurement.
-    np.testing.assert_allclose(log_error(np.array([-80.0]), np.array([-85.0])), 5.0)
+    assert log_error(np.array([-80.0]), np.array([-90.0])).tolist() == [10.0]
 
 
-def test_absolute_log_error_is_abs():
-    rng = np.random.default_rng(0)
-    measured, simulated = rng.uniform(-120.0, -60.0, size=(2, 20))
+def test_absolute_log_error_nan():
+    error = absolute_log_error(np.array([-80.0, np.nan]), np.array([-90.0, -70.0]))
 
-    np.testing.assert_array_equal(
-        absolute_log_error(measured, simulated), np.abs(log_error(measured, simulated))
-    )
+    assert error[0] == 10.0
+    assert np.isnan(error[1])
 
 
-def test_received_powers_no_path_is_zero():
-    measured, simulated = received_powers(np.array([-80.0, -90.0]), np.array([-70.0, np.nan]))
-
-    np.testing.assert_allclose(measured, dbm_to_mw(np.array([-80.0, -90.0])))
-    np.testing.assert_allclose(simulated, [dbm_to_mw(-70.0), 0.0])
+# --- features ---
 
 
-def test_received_powers_drops_missing_measurement():
-    measured_dbm = np.array([[-80.0, np.nan], [np.nan, -90.0]])
-    simulated_dbm = np.array([[-81.0, -60.0], [-50.0, -91.0]])
+def test_normalization_fit():
+    normalization = Normalization.fit(INPUTS, FLOOR_DB)
 
-    measured, simulated = received_powers(measured_dbm, simulated_dbm)
-
-    np.testing.assert_allclose(measured, dbm_to_mw(np.array([-80.0, -90.0])))
-    np.testing.assert_allclose(simulated, dbm_to_mw(np.array([-81.0, -91.0])))
+    assert normalization.floor_db == FLOOR_DB
+    assert normalization.path_gain_std > 0
+    assert normalization.height_std > 0
 
 
-def test_received_powers_scale_counts_no_path():
-    # A pair with no path stays in the sums of Eq. 43 with a simulated power of 0.
-    measured, simulated = received_powers(
-        10.0 * np.log10([1.0, 1.0]), np.array([10.0 * np.log10(2.0), np.nan])
-    )
-
-    assert scale_estimate(measured, simulated) == pytest.approx(1.0)
+def test_sensitivity_floor_db():
+    # -140 dBm - 4.85 dBm - 10 dB margin.
+    assert sensitivity_floor_db(-140.0, [4.85, 0.0]) == pytest.approx(-154.85)
 
 
-def test_received_powers_shape():
-    with pytest.raises(ValueError, match="shapes"):
-        received_powers(np.zeros(2), np.zeros(3))
+def test_normalization_no_map():
+    with pytest.raises(ValueError, match="minimum"):
+        Normalization.fit([], FLOOR_DB)
 
 
-# --- calibrate, save_calibration, load_calibration ---
+def test_normalization_state_round_trip():
+    normalization = Normalization.fit(INPUTS, FLOOR_DB)
+
+    assert Normalization.from_state(normalization.state()) == normalization
 
 
-@pytest.fixture
-def neural_scene():
-    """A new scene with a neural material for each test."""
-    scene = load_rt_scene("simple_street_canyon")
-    material = apply_neural_material(scene, make_material_network(**NETWORK, seed=1))
-    return scene, material
+def test_normalization_state_missing_key():
+    state = Normalization.fit(INPUTS, FLOOR_DB).state()
+    del state["floor_db"]
+
+    with pytest.raises(ValueError, match="floor_db"):
+        Normalization.from_state(state)
 
 
-def run_calibrate(neural_scene, rsrp_dbm=RSRP_DBM, **changes):
-    scene, material = neural_scene
-    calibration = replace(CALIBRATION, **changes)
-    return calibrate(
-        scene,
-        CELLS,
-        material,
-        POSITIONS,
-        rsrp_dbm,
-        (POSITIONS[:2], rsrp_dbm[:2]),
-        calibration,
-        SIMULATION,
-        seed=0,
-    )
+def test_base_path_gain_db():
+    inputs = make_inputs(0)
+    base = base_path_gain_db(inputs, floor_db=-100.0)
+    expected = 10 * np.log10(inputs.path_gain[0, 1, 1])
+
+    # A path gain of 0 and a path gain below the floor become the floor.
+    assert base[0, 0, 0] == -100.0
+    assert base[0, 1, 1] == pytest.approx(max(expected, -100.0))
+    assert base.min() == -100.0
 
 
-def test_calibrate_history_columns(neural_scene):
-    result = run_calibrate(neural_scene)
+def test_feature_padding_and_channels():
+    features = feature_tensor(INPUTS[0], Normalization.fit(INPUTS, FLOOR_DB), multiple=4)
 
-    assert list(result.history.columns) == [
-        "step",
-        "epoch",
-        "loss",
-        "scale",
-        "validation_loss",
-        "step_seconds",
+    assert features.shape == (2, len(FEATURE_NAMES), 8, 8)
+    assert features.dtype == np.float32
+    # The added rows and columns are 0.
+    assert (features[:, :, 6:, :] == 0).all() and (features[:, :, :, 7:] == 0).all()
+
+
+def test_feature_floor_and_mask():
+    features = feature_tensor(INPUTS[0], Normalization.fit(INPUTS, FLOOR_DB), multiple=4)
+    has_path = features[:, FEATURE_NAMES.index("has_path")]
+
+    assert has_path[0, 0, 0] == 0.0
+    assert has_path[0, 1, 1] == 1.0
+
+
+def test_feature_distance_scaled():
+    inputs = make_inputs(0)
+    distance = feature_tensor(inputs, Normalization.fit(INPUTS, FLOOR_DB), multiple=1)[
+        :, FEATURE_NAMES.index("distance")
     ]
-    assert result.history["step"].tolist() == [0, 1, 2, 3]
-    assert result.history["epoch"].tolist() == [0, 0, 1, 1]
-    assert np.isfinite(result.history.drop(columns="validation_loss").to_numpy()).all()
-    # The validation is after the last step of each epoch.
-    assert np.isnan(result.history["validation_loss"]).tolist() == [True, False, True, False]
-    assert (result.history["step_seconds"] > 0).all()
+    center = GRID.centers()[2, 3, :2]
+    expected = np.linalg.norm(center - inputs.cell_xy[0]) / GRID.diagonal
+
+    assert distance[0, 2, 3] == pytest.approx(expected, rel=1e-6)
+    assert (distance <= 1).all()
 
 
-def test_calibrate_sets_material_scale(neural_scene):
-    _, material = neural_scene
+def test_feature_channel_subset():
+    channels = tuple(name for name in FEATURE_NAMES if name != "los")
 
-    result = run_calibrate(neural_scene)
+    features = feature_tensor(INPUTS[0], Normalization.fit(INPUTS, FLOOR_DB), 4, channels)
 
-    assert material.scale == result.history["scale"].iloc[-1]
-
-
-def test_calibrate_validation_interval(neural_scene):
-    result = run_calibrate(neural_scene, validation_interval=2)
-
-    assert np.isnan(result.history["validation_loss"]).tolist() == [True, True, True, False]
+    assert features.shape[1] == len(FEATURE_NAMES) - 1
 
 
-def record_batches(monkeypatch) -> list[np.ndarray]:
-    """Record the positions that `calibrate` gives to `compute_rsrp_mw` in each step."""
-    batches = []
-
-    def recording(scene, cells, positions, simulation):
-        batches.append(positions.copy())
-        return compute_rsrp_mw(scene, cells, positions, simulation)
-
-    monkeypatch.setattr(train_module, "compute_rsrp_mw", recording)
-    return batches
+def test_feature_unknown_channel():
+    with pytest.raises(ValueError, match="channels"):
+        feature_tensor(INPUTS[0], Normalization.fit(INPUTS, FLOOR_DB), 4, ["nope"])
 
 
-def test_calibrate_epoch_uses_each_record(neural_scene, monkeypatch):
-    batches = record_batches(monkeypatch)
-
-    result = run_calibrate(neural_scene)
-
-    assert [len(batch) for batch in batches] == [3, 1, 3, 1]
-    for epoch in (0, 1):
-        steps = np.flatnonzero(result.history["epoch"] == epoch)
-        used = np.concatenate([batches[step] for step in steps])
-        assert sorted(map(tuple, used)) == sorted(map(tuple, POSITIONS))
+# --- U-Net ---
 
 
-def test_calibrate_batch_larger_than_records(neural_scene, monkeypatch):
-    batches = record_batches(monkeypatch)
+def test_unet_output_shape():
+    network = UNet(6, 8, 2, 4)
 
-    result = run_calibrate(neural_scene, batch_size=8)
-
-    assert result.history["epoch"].tolist() == [0, 1]
-    assert [len(batch) for batch in batches] == [4, 4]
+    assert network(torch.zeros(3, 6, 8, 12)).shape == (3, 8, 12)
 
 
-def test_calibrate_changes_network(neural_scene):
-    _, material = neural_scene
-    before = weights_of(material.network)
-
-    run_calibrate(neural_scene)
-
-    assert (weights_of(material.network) != before).any()
+def test_unet_bad_size():
+    with pytest.raises(ValueError, match="multiples of 4"):
+        UNet(6, 8, 2, 4)(torch.zeros(1, 6, 6, 8))
 
 
-def recovers_scale_case(neural_scene, factor: float) -> np.ndarray:
-    """Return a measurement that is the simulation divided by `factor`."""
-    scene, _ = neural_scene
-    simulated_mw = compute_rsrp_mw(scene, CELLS, POSITIONS, SIMULATION).numpy()
-    return 10.0 * np.log10(simulated_mw / factor)
+def test_unet_initial_output_zero():
+    output = UNet(6, 8, 2, 4)(torch.randn(2, 6, 8, 8))
+
+    assert (output == 0).all()
 
 
-def test_calibrate_recovers_scale(neural_scene):
-    _, material = neural_scene
-    measured_dbm = recovers_scale_case(neural_scene, factor=4.0)
+def test_unet_output_independent_of_batch():
+    torch.manual_seed(0)
+    network = UNet(6, 8, 2, 4)
+    torch.nn.init.normal_(network.output.weight)
+    first, second = torch.randn(1, 6, 8, 8), torch.randn(1, 6, 8, 8) * 10
 
-    result = run_calibrate(neural_scene, measured_dbm, learning_rate=0.0, batch_size=4)
+    with torch.no_grad():
+        alone = network(first)
+        together = network(torch.cat([first, second]))[:1]
 
-    # The scale divides the simulated power. A scale applied two times gives 2 or 16.
-    assert material.scale == pytest.approx(4.0, rel=0.1)
-    assert result.history["loss"].iloc[0] < 0.1
-
-
-def test_calibrate_resets_scale(neural_scene):
-    _, material = neural_scene
-    measured_dbm = recovers_scale_case(neural_scene, factor=4.0)
-    material.scale = 100.0
-
-    result = run_calibrate(neural_scene, measured_dbm, learning_rate=0.0, batch_size=4)
-
-    # The first step does not start from the old scale of the material.
-    assert result.history["scale"].iloc[0] == pytest.approx(4.0, rel=0.1)
+    torch.testing.assert_close(alone, together)
 
 
-def test_calibrate_cleans_scene(neural_scene):
-    scene, _ = neural_scene
-
-    run_calibrate(neural_scene)
-
-    assert len(scene.transmitters) == 0
-    assert len(scene.receivers) == 0
+def test_unet_bad_groups():
+    with pytest.raises(ValueError, match="groups"):
+        UNet(6, 12, 2, 8)
 
 
-def test_calibrate_no_record(neural_scene):
-    scene, material = neural_scene
+def test_unet_parameter_count():
+    network = UNet(len(FEATURE_NAMES), 32, 3, 8)
 
-    with pytest.raises(ValueError, match="train record"):
-        calibrate(
-            scene,
-            CELLS,
-            material,
-            POSITIONS[:0],
-            RSRP_DBM[:0],
-            (POSITIONS, RSRP_DBM),
-            CALIBRATION,
-            SIMULATION,
-            seed=0,
+    assert 1.8e6 < sum(p.numel() for p in network.parameters()) < 2.0e6
+
+
+# --- training ---
+
+
+def run_pretrain(**changes):
+    return pretrain(INPUTS, LABELS, CALIBRATION, seed=0, device=CPU, floor_db=FLOOR_DB, **changes)
+
+
+def test_predict_db_untrained_equals_base():
+    normalization = Normalization.fit(INPUTS, FLOOR_DB)
+    network = make_network(len(FEATURE_NAMES), CALIBRATION)
+    features = torch.as_tensor(feature_tensor(INPUTS[0], normalization, 4))
+    base = torch.randn(2, 8, 8)
+
+    predicted = predict_db(network, features, base, normalization, residual=True)
+
+    torch.testing.assert_close(predicted, base)
+
+
+def test_predict_db_direct():
+    normalization = Normalization.fit(INPUTS, FLOOR_DB)
+    network = make_network(len(FEATURE_NAMES), CALIBRATION)
+    features = torch.as_tensor(feature_tensor(INPUTS[0], normalization, 4))
+
+    predicted = predict_db(network, features, torch.randn(2, 8, 8), normalization, residual=False)
+
+    # A new network gives 0, thus the direct output is the mean path gain.
+    assert torch.allclose(
+        predicted, torch.tensor(normalization.path_gain_mean, dtype=torch.float32)
+    )
+
+
+def test_pretrain_history_columns():
+    result = run_pretrain()
+
+    assert list(result.history.columns) == list(HISTORY_COLUMNS)
+    assert len(result.history) == CALIBRATION.pretraining.num_epochs
+    assert (result.history["stage"] == "pretraining").all()
+    assert result.history["validation_loss"].notna().all()
+
+
+def test_pretrain_loss_decreases():
+    calibration = CalibrationSettings.from_mapping(
+        CALIBRATION_MAPPING
+        | {"pretraining": {"learning_rate": 1e-2, "batch_size": 4, "num_epochs": 15}}
+    )
+
+    history = pretrain(INPUTS, LABELS, calibration, seed=0, device=CPU, floor_db=FLOOR_DB).history
+
+    assert history["loss"].iloc[-1] < history["loss"].iloc[0]
+
+
+def test_pretrain_keeps_best_checkpoint():
+    result = run_pretrain()
+    # The validation part is the first map of the random order of seed 0 (1 of 5 maps).
+    index = np.random.default_rng(0).permutation(len(INPUTS))[0]
+
+    predicted = predict_maps_db(result.network, result.normalization, INPUTS[index], CPU)
+    label = LABELS[index]
+    # The loss is the MAE in dB over the grid cells with a target more than 0.
+    covered = label > 0
+    loss = np.abs(10 * np.log10(label[covered]) - predicted[covered]).mean()
+
+    # The kept parameters give the smallest validation loss of the history.
+    assert loss == pytest.approx(result.history["validation_loss"].min(), rel=1e-3)
+
+
+def test_pretrain_ignores_zero_labels():
+    zero = [np.zeros_like(label) for label in LABELS]
+
+    history = pretrain(INPUTS, zero, CALIBRATION, seed=0, device=CPU, floor_db=FLOOR_DB).history
+
+    # No grid cell has a target, thus the loss is 0.
+    assert (history["loss"] == 0).all()
+    assert (history["validation_loss"] == 0).all()
+
+
+def test_pretrain_label_shape():
+    with pytest.raises(ValueError, match="shape"):
+        pretrain(INPUTS, [label[:1] for label in LABELS], CALIBRATION, 0, CPU, floor_db=FLOOR_DB)
+
+
+def test_pretrain_needs_two_maps():
+    with pytest.raises(ValueError, match="two"):
+        pretrain(INPUTS[:1], LABELS[:1], CALIBRATION, seed=0, device=CPU, floor_db=FLOOR_DB)
+
+
+def records(num: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Records in the grid, with the RSRP 3 dB above the input map plus a power of 0 dBm."""
+    rng = np.random.default_rng(seed)
+    positions = np.column_stack(
+        [rng.uniform(0, 70, num), rng.uniform(0, 60, num), np.full(num, 1.5)]
+    )
+    row, column, _ = GRID.cell_index(positions)
+    with np.errstate(divide="ignore"):
+        rsrp = 10 * np.log10(INPUTS[0].path_gain[:, row, column].T * 2.0)
+    return positions, np.where(np.isfinite(rsrp), rsrp, np.nan)
+
+
+def run_fine_tune(network=None, positions_rsrp=None):
+    result = run_pretrain()
+    network = result.network if network is None else network
+    positions, rsrp = records(40, 1) if positions_rsrp is None else positions_rsrp
+    history = fine_tune(
+        network,
+        result.normalization,
+        INPUTS[0],
+        positions,
+        rsrp,
+        records(10, 2),
+        np.zeros(2),
+        CALIBRATION,
+        seed=0,
+        device=CPU,
+    )
+    return network, history
+
+
+def test_fine_tune_history():
+    _, history = run_fine_tune()
+
+    assert list(history.columns) == list(HISTORY_COLUMNS)
+    assert (history["stage"] == "fine_tuning").all()
+    assert len(history) == CALIBRATION.fine_tuning.num_epochs
+
+
+def test_fine_tune_changes_all_layers():
+    network = run_pretrain().network
+    before = {name: value.clone() for name, value in network.state_dict().items()}
+    run_fine_tune(network)
+
+    changed = {
+        name for name, value in network.state_dict().items() if not torch.equal(value, before[name])
+    }
+    assert "encoder.0.0.weight" in changed
+    assert "output.weight" in changed
+
+
+def test_fine_tune_no_record():
+    outside = np.array([[1000.0, 1000.0, 1.5]])
+
+    with pytest.raises(ValueError, match="minimum"):
+        run_fine_tune(positions_rsrp=(outside, np.array([[-80.0, -80.0]])))
+
+
+def test_fine_tune_drops_outside_records():
+    positions, rsrp = records(20, 1)
+    positions = np.vstack([positions, [[1000.0, 1000.0, 1.5]]])
+    rsrp = np.vstack([rsrp, [[-80.0, -80.0]]])
+
+    _, history = run_fine_tune(positions_rsrp=(positions, rsrp))
+
+    assert history["loss"].notna().all()
+
+
+def test_predict_maps_db_shape():
+    result = run_pretrain()
+
+    predicted = predict_maps_db(result.network, result.normalization, INPUTS[0], CPU)
+
+    assert predicted.shape == (2, GRID.ny, GRID.nx)
+
+
+# --- files ---
+
+
+def test_save_load_round_trip(tmp_path):
+    result = run_pretrain()
+    path = tmp_path / "model.pt"
+    channels = FEATURE_NAMES[:-1]
+
+    save_model(path, result.network, result.normalization, channels, residual=False)
+    network, normalization, loaded_channels, residual = load_model(path, CPU)
+
+    assert normalization == result.normalization
+    assert loaded_channels == channels
+    assert residual is False
+    for name, value in result.network.state_dict().items():
+        torch.testing.assert_close(network.state_dict()[name], value)
+
+
+def test_save_bad_suffix(tmp_path):
+    result = run_pretrain()
+
+    with pytest.raises(ValueError, match=".pt"):
+        save_model(
+            tmp_path / "model.npz", result.network, result.normalization, FEATURE_NAMES, True
         )
 
 
-def test_save_load_calibration_round_trip(neural_scene, tmp_path):
-    _, material = neural_scene
-    path = tmp_path / "calibration.npz"
+def test_load_rejects_missing_key(tmp_path):
+    path = tmp_path / "model.pt"
+    torch.save({"state_dict": {}}, path)
 
-    material.scale = 2.5
-
-    save_calibration(path, material)
-    loaded = load_calibration(path, "loaded")
-
-    assert loaded.scale == 2.5
-    for value, expected in zip(loaded.values_at(POINTS), material.values_at(POINTS), strict=True):
-        np.testing.assert_array_equal(value.numpy(), expected.numpy())
+    with pytest.raises(ValueError, match="architecture"):
+        load_model(path, CPU)
 
 
-def test_save_calibration_bad_suffix(neural_scene, tmp_path):
-    _, material = neural_scene
-    material.scale = 1.0
-
-    with pytest.raises(ValueError, match="npz"):
-        save_calibration(tmp_path / "calibration.bin", material)
-
-
-def test_save_calibration_no_scale(neural_scene, tmp_path):
-    _, material = neural_scene
-
-    with pytest.raises(ValueError, match="scale"):
-        save_calibration(tmp_path / "calibration.npz", material)
-
-
-def test_load_calibration_missing_scale(neural_scene, tmp_path):
-    _, material = neural_scene
-    path = tmp_path / "calibration.npz"
-    np.savez(path, **material.state())
-
-    with pytest.raises(ValueError, match="scale"):
-        load_calibration(path, "loaded")
-
-
-@pytest.mark.parametrize("scale", [0.0, -1.0, np.nan, np.inf])
-def test_load_calibration_bad_scale(neural_scene, tmp_path, scale):
-    _, material = neural_scene
-    path = tmp_path / "calibration.npz"
-    np.savez(path, **material.state(), scale=np.array(scale))
-
-    with pytest.raises(ValueError, match="scale"):
-        load_calibration(path, "loaded")
-
-
-def test_load_calibration_rejects_pickle(neural_scene, tmp_path):
-    _, material = neural_scene
-    path = tmp_path / "calibration.npz"
-    np.savez(
-        path, **(material.state() | {"weights": np.array([{"a": 1}], dtype=object)}), scale=1.0
-    )
-
-    with pytest.raises(ValueError):
-        load_calibration(path, "loaded")
+def test_history_is_frame():
+    assert isinstance(run_pretrain().history, pd.DataFrame)

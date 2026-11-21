@@ -1,8 +1,8 @@
-"""Error statistics of a calibrated model against the measured RSRP.
+"""Error statistics of a model against the measured RSRP and against a true path gain map.
 
 The functions use the arrays of the fixed data format: one row for each record and one
 column for each cell. NaN in the measured RSRP shows that the record does not have the
-cell. NaN in the simulated RSRP shows that no path connects the cell and the position.
+cell. NaN in the simulated RSRP shows that the model gives no RSRP for the pair.
 The functions do no ray tracing.
 """
 
@@ -32,26 +32,25 @@ def error_statistics(
     """Calculate the error statistics of the received (record, cell) pairs.
 
     A received pair is an element with a finite `measured_dbm`. The statistics in dB use
-    only the received pairs with a simulated path. `smape` uses all received pairs: the
-    symmetric absolute percentage error of the calibration loss (arXiv:2311.18558,
-    Eq. 39). The ratio of the measured power to the scaled simulated power is
-    `10 ** (error_db / 10)`, thus `smape` needs no scale. A pair with no path has a
-    `smape` of 1, as in the calibration.
+    only the received pairs with a simulated value. `smape` uses all received pairs: it is
+    the symmetric absolute percentage error of the linear powers. The ratio of the two
+    powers is `10 ** (error_db / 10)`, thus `smape` does not need the absolute powers. A pair
+    with no simulated value has a `smape` of 1.
 
     Args:
         measured_dbm: Measured RSRP in dBm. NaN shows that the record does not have the
             cell.
-        simulated_dbm: Simulated RSRP in dBm with the power scale of the model, with the
-            same shape. NaN shows that no path connects the cell and the position.
+        simulated_dbm: Simulated RSRP in dBm, with the same shape. NaN shows that the
+            model gives no RSRP for the pair.
         quantiles: Quantiles of the absolute error, each from 0 to 1.
 
     Returns:
         A series with these values:
 
         - `pairs`: number of received pairs.
-        - `no_path_fraction`: fraction of the received pairs with no simulated path.
+        - `no_path_fraction`: fraction of the received pairs with no simulated value.
         - `bias_db`: mean signed error.
-        - `mae_db`: mean absolute error. It is the mean ALE of the paper (Eq. 44).
+        - `mae_db`: mean absolute error.
         - `rmse_db`: root mean square error.
         - `std_db`: standard deviation of the signed error.
         - `q<percent>_abs_db`: one quantile of the absolute error for each value of
@@ -84,7 +83,7 @@ def error_statistics(
     found = error[has_path]
     absolute = np.abs(found)
     loss = np.ones_like(error)
-    loss[has_path] = smape(10.0 ** (found / 10.0), 1.0)
+    loss[has_path] = smape(10.0 ** (found / 10.0), 1.0, epsilon=0.0)
     statistics = {"pairs": float(error.size), "no_path_fraction": float(np.mean(~has_path))}
     if found.size:
         statistics |= {
@@ -174,3 +173,66 @@ def nearest_distance(points: np.ndarray, reference: np.ndarray) -> np.ndarray:
         raise ValueError("The reference must have a minimum of one position.")
     distance, _ = KDTree(reference[:, :2]).query(np.asarray(points, dtype=float)[:, :2])
     return np.asarray(distance, dtype=float)
+
+
+def map_statistics(
+    true_path_gain: np.ndarray,
+    predicted_path_gain_db: np.ndarray,
+    quantiles: Sequence[float],
+    min_true_db: float = -np.inf,
+) -> pd.Series:
+    """Calculate the error statistics of a path gain map against the true map.
+
+    The statistics use only the grid cells where the true path gain is more than 0 and at or
+    above `min_true_db`. The error is the true path gain minus the predicted path gain, in dB.
+
+    Args:
+        true_path_gain: True linear path gain, with shape `[n_cells, ny, nx]`.
+        predicted_path_gain_db: Predicted path gain in dB, with the same shape. NaN shows a
+            grid cell with no prediction.
+        quantiles: Quantiles of the absolute error, each from 0 to 1.
+        min_true_db: Smallest true path gain of the statistics, in dB. Use the smallest path
+            gain that a UE can measure to compare only the grid cells that matter for a
+            measurement.
+
+    Returns:
+        A series with `grid_cells`, `no_prediction_fraction`, `bias_db`, `mae_db`,
+        `rmse_db`, `std_db`, one `q<percent>_abs_db` for each quantile, and `pearson`.
+
+    Raises:
+        ValueError: If the two arrays do not have the same shape, if no true path gain is in
+            the range, or if a quantile is not from 0 to 1.
+    """
+    true_path_gain = np.asarray(true_path_gain, dtype=float)
+    predicted = np.asarray(predicted_path_gain_db, dtype=float)
+    if true_path_gain.shape != predicted.shape:
+        raise ValueError(
+            f"The shapes must be equal, but they are {true_path_gain.shape} and {predicted.shape}."
+        )
+    with np.errstate(divide="ignore"):
+        covered = (true_path_gain > 0) & (10.0 * np.log10(true_path_gain) >= min_true_db)
+    if not covered.any():
+        raise ValueError("The true map must have a minimum of one path gain in the range.")
+    if any(not 0.0 <= quantile <= 1.0 for quantile in quantiles):
+        raise ValueError(f"Each quantile must be from 0 to 1, but they are {list(quantiles)}.")
+    true_db = 10.0 * np.log10(true_path_gain[covered])
+    predicted = predicted[covered]
+    has_value = np.isfinite(predicted)
+    error = true_db[has_value] - predicted[has_value]
+    absolute = np.abs(error)
+    statistics = {
+        "grid_cells": float(covered.sum()),
+        "no_prediction_fraction": float(np.mean(~has_value)),
+        "bias_db": float(np.mean(error)) if error.size else float("nan"),
+        "mae_db": float(np.mean(absolute)) if error.size else float("nan"),
+        "rmse_db": float(np.sqrt(np.mean(error**2))) if error.size else float("nan"),
+        "std_db": float(np.std(error)) if error.size else float("nan"),
+    }
+    statistics |= {
+        _quantile_name(quantile): float(np.quantile(absolute, quantile))
+        if error.size
+        else float("nan")
+        for quantile in quantiles
+    }
+    statistics["pearson"] = _pearson(true_db[has_value], predicted[has_value])
+    return pd.Series(statistics)

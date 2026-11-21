@@ -1,4 +1,4 @@
-"""Sionna RT functions: scene load, RSRP calculation, and neural material."""
+"""Sionna RT functions: scene load, path gain maps, and the geometry of the scene."""
 
 import mitsuba as mi
 
@@ -6,25 +6,28 @@ import mitsuba as mi
 # import of `sionna.rt`. No fallback to the LLVM variant: a CUDA failure must be visible.
 mi.set_variant("cuda_ad_mono_polarized")
 
-from radio_calibration.simulation.neural_material import (  # noqa: E402
-    MaterialValues,
-    NeuralRadioMaterial,
-    apply_neural_material,
-    assign_material,
-    check_scale,
-    make_material_network,
+from radio_calibration.simulation.height_map import (  # noqa: E402
+    HeightMap,
+    building_height_map,
+    cell_buildings,
+    is_outdoor,
+    los_map,
 )
-from radio_calibration.simulation.paths import compute_rsrp_dbm, compute_rsrp_mw  # noqa: E402
+from radio_calibration.simulation.radio_map import (  # noqa: E402
+    compute_map_inputs,
+    compute_path_gain_map,
+    scene_grid,
+)
 from radio_calibration.simulation.scene import load_rt_scene  # noqa: E402
 
 __all__ = [
-    "MaterialValues",
-    "NeuralRadioMaterial",
-    "apply_neural_material",
-    "assign_material",
-    "check_scale",
-    "compute_rsrp_dbm",
-    "compute_rsrp_mw",
+    "HeightMap",
+    "building_height_map",
+    "cell_buildings",
+    "compute_map_inputs",
+    "compute_path_gain_map",
+    "is_outdoor",
     "load_rt_scene",
-    "make_material_network",
+    "los_map",
+    "scene_grid",
 ]

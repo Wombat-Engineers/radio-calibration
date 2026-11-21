@@ -1,0 +1,14 @@
+# Capability: the model predicts an area with no MDT record. The records are divided by
+# square blocks of the reported position, thus no test block has a train record.
+defaults:
+  - munich_base
+  - _self_
+
+name: munich_unmeasured_area
+
+split:
+  method: spatial
+  # Side of a block. Assumption.
+  block_size_m: 200.0
+  # Fractions of the blocks for the train, validation, and test parts. Assumption.
+  fractions: [0.7, 0.1, 0.2]

@@ -5,18 +5,20 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-import drjit as dr
 import numpy as np
 import pytest
 
-from radio_calibration.core import SimulationSettings
+from radio_calibration.core import RadioMapGrid, SimulationSettings
 from radio_calibration.simulation import (
-    NeuralRadioMaterial,
-    apply_neural_material,
-    compute_rsrp_dbm,
-    compute_rsrp_mw,
+    HeightMap,
+    building_height_map,
+    cell_buildings,
+    compute_map_inputs,
+    compute_path_gain_map,
+    is_outdoor,
     load_rt_scene,
-    make_material_network,
+    los_map,
+    scene_grid,
 )
 from tests.test_core import make_cell
 
@@ -27,23 +29,15 @@ IN_BUILDING = [-40.0, 30.0, 1.5]
 # The sample count is small because the GPU of the development machine has 4 GB of memory.
 SIMULATION = SimulationSettings(
     frequency_hz=2.6e9,
-    subcarrier_spacing_hz=30e3,
-    receiver={
-        "num_rows": 1,
-        "num_cols": 1,
-        "vertical_spacing": 0.5,
-        "horizontal_spacing": 0.5,
-        "pattern": "dipole",
-        "polarization": "V",
-    },
-    solver={
-        "samples_per_src": 10_000,
+    radio_map={
+        "samples_per_tx": 100_000,
         "max_depth": 2,
         "diffraction": False,
         "refraction": False,
+        "seed": 1,
     },
-    deterministic=True,
-    rx_batch_size=4,
+    radio_map_cell_size_m=10.0,
+    radio_map_tx_batch_size=2,
 )
 # Two cells above the street. They point along the street, one in each direction.
 CELLS = [
@@ -55,6 +49,11 @@ CELLS = [
 @pytest.fixture(scope="module")
 def scene():
     return load_rt_scene("simple_street_canyon")
+
+
+@pytest.fixture(scope="module")
+def grid(scene):
+    return scene_grid(scene, SIMULATION.radio_map_cell_size_m, 1.5)
 
 
 def test_load_rt_scene_builtin(scene):
@@ -88,15 +87,23 @@ def test_load_rt_scene_bad_suffix(tmp_path):
         load_rt_scene(path)
 
 
+def test_load_rt_scene_unmerged(scene):
+    unmerged = load_rt_scene("simple_street_canyon", merge_shapes=False)
+
+    # One object for each shape: 6 buildings and the floor.
+    assert len(unmerged.objects) == 7
+    assert len(unmerged.objects) >= len(scene.objects)
+
+
 # --- package boundary ---
 
-LAB_MODULES = ("scenario", "utils", "preprocessing", "analysis")
+LAB_MODULES = ("scenario", "utils", "preprocessing", "experiments")
 
 
 def test_package_does_not_import_lab():
     # A new process: this test process imported other modules already. The list has no
     # matplotlib: sionna.rt imports it.
-    names = [*LAB_MODULES, "hydra", "torch"]
+    names = [*LAB_MODULES, "hydra"]
     code = (
         "import sys, radio_calibration.simulation, radio_calibration.calibration, "
         "radio_calibration.evaluation; "
@@ -108,6 +115,14 @@ def test_package_does_not_import_lab():
     assert result.stdout.strip().splitlines()[-1] == "[]"
 
 
+def test_simulation_does_not_import_torch():
+    code = "import sys, radio_calibration.simulation; print('torch' in sys.modules)"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "False"
+
+
 def test_package_has_only_deployment_modules():
     import radio_calibration
 
@@ -117,310 +132,133 @@ def test_package_has_only_deployment_modules():
     assert subpackages == {"core", "simulation", "calibration", "evaluation"}
 
 
-def test_compute_rsrp_dbm_shape(scene):
-    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
+# --- height map, outdoor test, building summary, line of sight ---
 
-    assert compute_rsrp_dbm(scene, CELLS, positions, SIMULATION).shape == (4, 2)
+
+def test_height_map_street_canyon(scene):
+    height_map = building_height_map(scene, tile_size=5.0)
+
+    assert height_map.heights.ndim == 2
+    assert (height_map.heights > 10.0).any()
+    assert (height_map.heights < 0.5).any()
+    assert (height_map.heights >= 0.0).all()
+
+
+def test_height_map_bad_tile_size(scene):
+    with pytest.raises(ValueError):
+        building_height_map(scene, tile_size=0.0)
+
+
+def test_is_outdoor_street(scene):
+    assert is_outdoor(scene, np.array([STREET])).tolist() == [True]
+
+
+def test_is_outdoor_in_building(scene):
+    outside_scene = [1000.0, 1000.0, 1.5]
+    assert is_outdoor(scene, np.array([IN_BUILDING, outside_scene])).tolist() == [False, False]
+
+
+def test_cell_buildings_max_and_fraction():
+    heights = np.zeros((4, 4))
+    heights[1, 2] = 10.0
+    height_map = HeightMap(heights, 0.0, 0.0, 0.0, 5.0)
+    grid = RadioMapGrid(0.0, 0.0, 1.5, 20.0, 1, 1)
+
+    max_height, fraction = cell_buildings(height_map, grid, 2.0)
+
+    assert max_height.tolist() == [[10.0]]
+    assert fraction.tolist() == [[1 / 16]]
+
+
+def test_cell_buildings_pads_outside():
+    height_map = HeightMap(np.full((2, 2), 10.0), 0.0, 0.0, 0.0, 5.0)
+    grid = RadioMapGrid(0.0, 0.0, 1.5, 20.0, 2, 1)
+
+    _, fraction = cell_buildings(height_map, grid, 2.0)
+
+    assert fraction.tolist() == [[4 / 16, 0.0]]
+
+
+@pytest.mark.parametrize(
+    ("grid", "match"),
+    [
+        (RadioMapGrid(0.0, 0.0, 1.5, 18.0, 1, 1), "multiple"),
+        (RadioMapGrid(3.0, 0.0, 1.5, 20.0, 1, 1), "corner"),
+    ],
+)
+def test_cell_buildings_bad_grid(grid, match):
+    height_map = HeightMap(np.zeros((4, 4)), 0.0, 0.0, 0.0, 5.0)
+
+    with pytest.raises(ValueError, match=match):
+        cell_buildings(height_map, grid, 2.0)
+
+
+def test_los_map_street(scene, grid):
+    los = los_map(scene, CELLS[:1], grid)
+    row, column, _ = grid.cell_index(np.array([STREET, IN_BUILDING]))
+
+    assert los.shape == (1, grid.ny, grid.nx)
+    assert los[0, row[0], column[0]]
+    assert not los[0, row[1], column[1]]
+
+
+# --- path gain maps ---
+
+
+def test_scene_grid_covers_scene(scene, grid):
+    bbox = scene.mi_scene.bbox()
+
+    assert grid.x_min == pytest.approx(float(bbox.min.x))
+    assert grid.x_min + grid.nx * grid.cell_size >= float(bbox.max.x)
+    assert grid.y_min + grid.ny * grid.cell_size >= float(bbox.max.y)
+    assert grid.z == pytest.approx(float(bbox.min.z) + 1.5)
+
+
+def test_path_gain_map_shape_and_range(scene, grid):
+    path_gain = compute_path_gain_map(scene, CELLS, grid, SIMULATION)
+    row, column, _ = grid.cell_index(np.array([STREET]))
+
+    assert path_gain.shape == (2, grid.ny, grid.nx)
+    assert ((path_gain >= 0) & (path_gain <= 1)).all()
+    assert (path_gain[:, row[0], column[0]] > 0).all()
+
+
+def test_path_gain_map_batches_equal(scene, grid):
+    one = compute_path_gain_map(scene, CELLS, grid, replace(SIMULATION, radio_map_tx_batch_size=1))
+    two = compute_path_gain_map(scene, CELLS, grid, SIMULATION)
+    covered = (one > 0) & (two > 0)
+
+    assert one.shape == two.shape
+    # The same seed traces the same rays for each transmitter, thus the maps agree within the
+    # float error of the accumulation.
+    np.testing.assert_allclose(10 * np.log10(one[covered]), 10 * np.log10(two[covered]), atol=0.1)
+
+
+def test_path_gain_map_cleans_scene(scene, grid):
+    compute_path_gain_map(scene, CELLS, grid, SIMULATION)
+
     assert len(scene.transmitters) == 0
-    assert len(scene.receivers) == 0
 
 
-def test_compute_rsrp_dbm_los_finite(scene):
-    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([STREET]), SIMULATION)
-
-    assert np.isfinite(rsrp).all()
-    # A path has a loss, and the gain of the 2 x 2 array with the pattern is below 30 dB.
-    assert (rsrp < CELLS[0].power_rs_dbm + 30.0).all()
-
-
-def test_compute_rsrp_dbm_indoor_nan(scene):
-    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([IN_BUILDING]), SIMULATION)
-
-    assert np.isnan(rsrp).all()
-
-
-def test_compute_rsrp_dbm_batches_equal(scene):
-    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
-    one_by_one = replace(SIMULATION, rx_batch_size=1)
-
-    np.testing.assert_allclose(
-        compute_rsrp_dbm(scene, CELLS, positions, one_by_one),
-        compute_rsrp_dbm(scene, CELLS, positions, SIMULATION),
-        atol=1.0,
-    )
-
-
-def test_compute_rsrp_dbm_deterministic_repeats(scene):
-    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
-
-    first = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION)
-    second = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION)
-
-    np.testing.assert_array_equal(first, second)
-
-
-def test_compute_rsrp_dbm_mixed_arrays(scene):
-    cells = [CELLS[0], make_cell("other", num_rows=4, num_cols=2)]
-
-    with pytest.raises(ValueError, match="same array"):
-        compute_rsrp_dbm(scene, cells, np.array([STREET]), SIMULATION)
-    assert len(scene.transmitters) == 0
-
-
-def test_compute_rsrp_dbm_bad_positions(scene):
-    with pytest.raises(ValueError, match="shape"):
-        compute_rsrp_dbm(scene, CELLS, np.zeros((4, 2)), SIMULATION)
-
-
-def test_compute_rsrp_dbm_refraction_reaches_indoor(scene):
-    with_refraction = replace(SIMULATION, solver=SIMULATION.solver | {"refraction": True})
-
-    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([IN_BUILDING]), with_refraction)
-
-    assert np.isfinite(rsrp).any()
-
-
-def test_compute_rsrp_dbm_unknown_solver_key(scene):
-    unknown = replace(SIMULATION, solver=SIMULATION.solver | {"nope": 1})
+def test_path_gain_map_unknown_key(scene, grid):
+    settings = replace(SIMULATION, radio_map={**SIMULATION.radio_map, "nope": 1})
 
     with pytest.raises(TypeError):
-        compute_rsrp_dbm(scene, CELLS, np.array([STREET]), unknown)
-    assert len(scene.transmitters) == 0
-    assert len(scene.receivers) == 0
-
-
-# --- compute_rsrp_mw ---
-
-
-def test_compute_rsrp_mw_matches_compute_rsrp_dbm(scene):
-    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
-
-    power_mw = compute_rsrp_mw(scene, CELLS, positions, SIMULATION).numpy()
-
-    np.testing.assert_allclose(
-        10.0 * np.log10(power_mw), compute_rsrp_dbm(scene, CELLS, positions, SIMULATION), atol=1.0
-    )
-
-
-def test_compute_rsrp_mw_no_path_is_zero(scene):
-    power_mw = compute_rsrp_mw(scene, CELLS, np.array([IN_BUILDING]), SIMULATION).numpy()
-
-    assert power_mw.shape == (1, 2)
-    assert (power_mw == 0).all()
-
-
-def test_compute_rsrp_mw_cleans_scene(scene):
-    compute_rsrp_mw(scene, CELLS, np.array([STREET]), SIMULATION)
-
-    assert len(scene.transmitters) == 0
-    assert len(scene.receivers) == 0
-
-
-@pytest.mark.parametrize("positions", [np.zeros((4, 2)), np.zeros((0, 3))])
-def test_compute_rsrp_mw_bad_positions(scene, positions):
-    with pytest.raises(ValueError, match="positions"):
-        compute_rsrp_mw(scene, CELLS, positions, SIMULATION)
-
-
-# --- power scale ---
-
-
-def test_compute_rsrp_dbm_scale(scene):
-    positions = np.array([STREET])
-    unscaled = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION)
-
-    scaled = compute_rsrp_dbm(scene, CELLS, positions, SIMULATION, scale=0.5)
-
-    # A scale of 0.5 adds 10 log10(2) dB.
-    np.testing.assert_allclose(scaled, unscaled + 10.0 * np.log10(2.0), atol=1e-6)
-
-
-def test_compute_rsrp_dbm_scale_keeps_nan(scene):
-    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([IN_BUILDING]), SIMULATION, scale=2.0)
-
-    assert np.isnan(rsrp).all()
-
-
-def test_compute_rsrp_mw_scale(scene):
-    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
-    unscaled = compute_rsrp_mw(scene, CELLS, positions, SIMULATION).numpy()
-
-    scaled = compute_rsrp_mw(scene, CELLS, positions, SIMULATION, scale=4.0).numpy()
-
-    np.testing.assert_allclose(scaled, unscaled / 4.0, rtol=1e-6)
-
-
-@pytest.mark.parametrize("compute", [compute_rsrp_dbm, compute_rsrp_mw])
-@pytest.mark.parametrize("scale", [0.0, -1.0, np.nan, np.inf])
-def test_compute_rsrp_bad_scale(scene, compute, scale):
-    with pytest.raises(ValueError, match="scale"):
-        compute(scene, CELLS, np.array([STREET]), SIMULATION, scale=scale)
+        compute_path_gain_map(scene, CELLS, grid, settings)
     assert len(scene.transmitters) == 0
 
 
-# --- NeuralRadioMaterial ---
-
-# A small network: the GPU of the development machine has 4 GB of memory.
-NETWORK = {"encoding_octaves": 2, "hidden_layers": 1, "hidden_units": 8}
-POINTS = np.array([[0.0, 0.0, 0.0], [20.0, 5.0, 3.0], [-40.0, 30.0, 10.0]])
+def test_path_gain_map_duplicate_cell(scene, grid):
+    with pytest.raises(ValueError, match="unique"):
+        compute_path_gain_map(scene, [CELLS[0], CELLS[0]], grid, SIMULATION)
 
 
-def weights_of(network) -> np.ndarray:
-    return np.array(network["weights"], dtype=np.float32)
+def test_compute_map_inputs(scene, grid):
+    height_map = building_height_map(scene, tile_size=5.0)
 
+    inputs = compute_map_inputs(scene, CELLS, grid, height_map, SIMULATION, 2.0)
 
-@pytest.fixture
-def neural_scene():
-    """A new scene for each test: the neural material replaces the materials of the scene."""
-    scene = load_rt_scene("simple_street_canyon")
-    material = apply_neural_material(scene, make_material_network(**NETWORK, seed=1))
-    return scene, material
-
-
-def test_make_material_network_seed():
-    first = weights_of(make_material_network(**NETWORK, seed=1))
-
-    np.testing.assert_array_equal(first, weights_of(make_material_network(**NETWORK, seed=1)))
-    assert (first != weights_of(make_material_network(**NETWORK, seed=2))).any()
-
-
-@pytest.mark.parametrize("name", list(NETWORK))
-def test_make_material_network_bad_size(name):
-    with pytest.raises(ValueError, match=name):
-        make_material_network(**(NETWORK | {name: 0}), seed=1)
-
-
-def test_values_at_ranges(neural_scene):
-    _, material = neural_scene
-    values = material.values_at(POINTS)
-
-    assert (values.relative_permittivity.numpy() > 1).all()
-    assert (values.conductivity.numpy() > 0).all()
-    assert (values.thickness.numpy() > 0).all()
-    for coefficient in (values.scattering_coefficient, values.xpd_coefficient):
-        assert ((coefficient.numpy() > 0) & (coefficient.numpy() < 1)).all()
-
-
-def test_values_at_depends_on_position(neural_scene):
-    _, material = neural_scene
-    conductivity = material.values_at(POINTS).conductivity.numpy()
-
-    assert conductivity.shape == (len(POINTS),)
-    assert len(np.unique(conductivity)) == len(POINTS)
-
-
-def test_apply_neural_material_all_objects(neural_scene):
-    scene, material = neural_scene
-
-    assert all(obj.radio_material is material for obj in scene.objects.values())
-
-
-def test_apply_neural_material_survives_frequency(neural_scene):
-    scene, material = neural_scene
-    before = material.values_at(POINTS).conductivity.numpy()
-
-    scene.frequency = SIMULATION.frequency_hz
-
-    np.testing.assert_array_equal(material.values_at(POINTS).conductivity.numpy(), before)
-
-
-def test_compute_rsrp_dbm_with_neural_material(neural_scene):
-    scene, _ = neural_scene
-    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([STREET]), SIMULATION)
-
-    assert rsrp.shape == (1, 2)
-    assert np.isfinite(rsrp).all()
-
-
-def test_compute_rsrp_mw_repeats_exactly(neural_scene):
-    scene, _ = neural_scene
-    positions = np.array([[x, 0.0, 1.5] for x in (-30.0, -10.0, 10.0, 30.0)])
-
-    runs = [compute_rsrp_mw(scene, CELLS, positions, SIMULATION).numpy() for _ in range(3)]
-
-    np.testing.assert_array_equal(runs[0], runs[1])
-    np.testing.assert_array_equal(runs[0], runs[2])
-
-
-def test_compute_rsrp_dbm_no_synthetic_array(scene):
-    # Without a synthetic array, the delays have one value for each antenna pair.
-    real_array = replace(SIMULATION, solver=SIMULATION.solver | {"synthetic_array": False})
-
-    rsrp = compute_rsrp_dbm(scene, CELLS, np.array([STREET]), real_array)
-
-    assert rsrp.shape == (1, 2)
-    assert np.isfinite(rsrp).all()
-    np.testing.assert_allclose(
-        rsrp, compute_rsrp_dbm(scene, CELLS, np.array([STREET]), SIMULATION), atol=1.0
-    )
-
-
-def test_compute_rsrp_mw_gradient(neural_scene):
-    scene, material = neural_scene
-    # No weight decay: only a gradient can change the weights.
-    optimizer = dr.opt.AdamW(lr=1e-2, weight_decay=0.0)
-    optimizer.update(material.network)
-    material.network.update(optimizer)
-    before = weights_of(material.network)
-
-    power_mw = compute_rsrp_mw(scene, CELLS, np.array([STREET]), SIMULATION)
-    dr.backward(dr.sum(power_mw, axis=None))
-    optimizer.step()
-    material.network.update(optimizer)
-
-    assert (weights_of(material.network) != before).any()
-
-
-def test_state_round_trip(neural_scene):
-    _, material = neural_scene
-    copy = NeuralRadioMaterial.from_state(material.state(), "copy")
-
-    for value, expected in zip(copy.values_at(POINTS), material.values_at(POINTS), strict=True):
-        np.testing.assert_array_equal(value.numpy(), expected.numpy())
-
-
-def test_from_state_missing_key(neural_scene):
-    _, material = neural_scene
-    state = material.state()
-    del state["weights"]
-
-    with pytest.raises(ValueError, match="weights"):
-        NeuralRadioMaterial.from_state(state, "copy")
-
-
-def test_from_state_wrong_weight_count(neural_scene):
-    _, material = neural_scene
-    state = material.state()
-    state["weights"] = state["weights"][:-1]
-
-    with pytest.raises(ValueError, match="weights"):
-        NeuralRadioMaterial.from_state(state, "copy")
-
-
-def test_neural_material_scale_default_none(neural_scene):
-    _, material = neural_scene
-
-    assert material.scale is None
-
-
-@pytest.mark.parametrize("scale", [0.0, -1.0, np.nan, np.inf])
-def test_neural_material_bad_scale(neural_scene, scale):
-    _, material = neural_scene
-
-    with pytest.raises(ValueError, match="scale"):
-        material.scale = scale
-
-
-def test_neural_material_state_scale(neural_scene):
-    _, material = neural_scene
-    material.scale = 2.5
-
-    assert NeuralRadioMaterial.from_state(material.state(), "copy").scale == 2.5
-
-
-def test_neural_material_state_no_scale(neural_scene):
-    _, material = neural_scene
-    state = material.state()
-
-    assert "scale" not in state
-    assert NeuralRadioMaterial.from_state(state, "copy").scale is None
+    assert inputs.num_cells == 2
+    assert inputs.los.shape == inputs.path_gain.shape == (2, grid.ny, grid.nx)
+    assert inputs.cell_xy.tolist() == [[-60.0, 0.0], [60.0, 0.0]]
+    assert inputs.building_fraction.max() > 0

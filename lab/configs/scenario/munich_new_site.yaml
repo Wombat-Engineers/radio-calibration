@@ -1,0 +1,15 @@
+# Capability: the model predicts the cells of a site with no MDT record, as for a new site of
+# a network plan. The test part has all (record, cell) pairs of the test sites. The other pairs
+# go to the train part and the validation part by record.
+defaults:
+  - munich_base
+  - _self_
+
+name: munich_new_site
+
+split:
+  method: site
+  # Sites of the test part. Assumption.
+  test_sites: [2]
+  # Fraction of the other records for validation. Assumption.
+  validation_fraction: 0.1

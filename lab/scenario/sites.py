@@ -6,7 +6,7 @@ import numpy as np
 from omegaconf import DictConfig
 
 from radio_calibration.core import Cell
-from scenario.height_map import HeightMap
+from radio_calibration.simulation import HeightMap
 
 # Directions from the center of an equilateral triangle to its corners.
 _CORNER_ANGLES_DEG = (90.0, 210.0, 330.0)
